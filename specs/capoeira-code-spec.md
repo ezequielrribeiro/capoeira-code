@@ -1,9 +1,9 @@
 # 📜 Software Specification & Implementation Architecture: CapoeiraCode
 
 **Projeto:** CapoeiraCode  
-**Versão:** `1.0.0`  
-**Status:** `Approved`  
-**Data:** 18 de Agosto de 2026  
+**Versão:** `1.1.0`  
+**Status:** `Approved — Iteração 1 (CLI) implementada e testada`  
+**Data:** 20 de Agosto de 2026  
 
 ---
 
@@ -18,7 +18,7 @@ Sistemas legados possuem bases de código extensas, acopladas e com pouco suport
 ### 1.3. Objetivos de Design
 * **Economia Extrema de Tokens:** Redução de até 90% do contexto enviado através do uso de AST (*Tree-Sitter*) e grafos de dependência locais.
 * **Agnóstico a LLMs Web:** Suporte a qualquer plataforma web por meio de adaptadores simples na extensão do navegador.
-* **Multi-linguagem Expansível:** Suporte inicial para **PHP**, **JavaScript**, **HTML** e **CSS**, com arquitetura pronta para novos parsers.
+* **Multi-linguagem Expansível:** Suporte inicial para **PHP** e **JavaScript** (implementados), com **HTML** e **CSS** planejados e arquitetura pronta para novos parsers.
 * **Operação Atômica:** Aplicação rigorosa de alterações sem depender do usuário para copiar/colar diffs.
 
 ---
@@ -27,7 +27,7 @@ Sistemas legados possuem bases de código extensas, acopladas e com pouco suport
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
-│                          CAPOEIRA CODE (CLI)                           │
+│                          CAPOEIRA CODE (CLI) ✅                        │
 │                                                                        │
 │  ┌────────────────┐    ┌──────────────────┐    ┌────────────────────┐  │
 │  │ Context Engine │───>│ AST/Tree-Sitter  │───>│ Structural Reducer │  │
@@ -39,7 +39,7 @@ Sistemas legados possuem bases de código extensas, acopladas e com pouco suport
 └─────────────────────────────────┼──────────────────────────────────────┘
                                   │ (WebSocket Local / Port 8765)
 ┌─────────────────────────────────▼──────────────────────────────────────┐
-│                    BROWSER EXTENSION BRIDGE (MV3)                      │
+│                    BROWSER EXTENSION BRIDGE (MV3) ⏳                   │
 │                                                                        │
 │  ┌────────────────┐    ┌──────────────────┐    ┌────────────────────┐  │
 │  │ WS Client      │───>│ DOM Injector     │───>│ Provider Adapters  │  │
@@ -49,8 +49,10 @@ Sistemas legados possuem bases de código extensas, acopladas e com pouco suport
                                                            │ (DOM/UI)
 ┌──────────────────────────────────────────────────────────▼─────────────┐
 │                          WEB LLM INTERFACE                             │
-└──────────────────────────────────────────────────────────▼─────────────┘
+└────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Estado:** o CLI (metade superior) está implementado e testado; a extensão (MV3) é a próxima iteração.
 
 ---
 
@@ -58,27 +60,39 @@ Sistemas legados possuem bases de código extensas, acopladas e com pouco suport
 
 ### 3.1. Engine de Redução de Contexto (Context Reducer)
 * **Parser Base:** `Tree-Sitter` com suporte a gramáticas parametrizáveis.
-* **Linguagens Iniciais Suportadas:**
-  * **PHP:** Extração de métodos, classes, traits e resolução de `require`/`include` e namespaces.
-  * **JavaScript:** Extração de funções, rotas, ES modules / CommonJS.
-  * **HTML:** Seleção semântica de nós.
-  * **CSS:** Isolação de seletores relacionados a componentes específicos.
-* **Regra de Omissão:** Qualquer bloco de código fora do símbolo-alvo (*target symbol*) deve ser substituído por `// ... [Omitted by CapoeiraCode] ...` ou equivalente na linguagem.
+* **Linguagens:**
+  * **PHP** ✅ — Extração de métodos, classes e resolução de `require`/`include`/`require_once`/`include_once` e `use` (namespaces).
+  * **JavaScript** ✅ — `function_declaration`, `generator_function_declaration`, `method_definition`, arrow functions e `function_expression` em declaradores; dependências via `import` e `require(...)`.
+  * **HTML** ⏳ — Seleção semântica de nós (planejado).
+  * **CSS** ⏳ — Isolação de seletores relacionados a componentes específicos (planejado).
+* **Regra de Omissão:** Qualquer bloco de código fora do símbolo-alvo (*target symbol*) é substituído pelo placeholder exato `// ... [Omitted by CapoeiraCode] ...` (constante `OMISSION_PLACEHOLDER` em `cli/reducers/base.py`), preservando a indentação original do bloco.
 
-### 3.2. Adaptador de Suporte a Linguagens (Language Plugin Interface)
+### 3.2. Interface de Redutores (Language Plugin Interface)
 
-```typescript
-interface LanguageAdapter {
-  languageId: 'php' | 'javascript' | 'html' | 'css';
-  fileExtensions: string[];
-  
-  // Extrai esqueleto mantendo apenas o símbolo alvo
-  extractSkeleton(fileContent: string, targetSymbol: string): string;
-  
-  // Extrai dependências importadas/referenciadas no bloco
-  extractDependencies(fileContent: string, targetSymbol: string): string[];
-}
+> A interface é **Python** (o CLI é Python). A versão TypeScript presente na v1.0.0 era apenas conceitual e foi removida.
+
+```python
+# cli/reducers/base.py (resumo da interface real)
+class BaseLanguageReducer(ABC):
+    """Subclasses definem self.language e self.parser no __init__."""
+
+    @abstractmethod
+    def extract_skeleton(self, code_content: str, target_symbol: str) -> str:
+        """Código reduzido: corpos fora do target_symbol viram OMISSION_PLACEHOLDER."""
+
+    @abstractmethod
+    def extract_dependencies(self, code_content: str) -> list[str]:
+        """Arquivos/módulos importados no arquivo atual."""
+
+    # Concretos (usados pelo applier na ação replace_symbol):
+    def find_symbol_range(self, code_content: str, target_symbol: str) -> tuple[int, int] | None:
+        """Byte-range UTF-8 da definição completa do símbolo, ou None."""
+
+    def has_parse_errors(self, code_content: str) -> bool:
+        """True se o Tree-Sitter reportar erro de sintaxe."""
 ```
+
+**Registro por extensão:** `cli/reducers/__init__.py` expõe `get_reducer_for_path()` mapeando `.php` → `PHPReducer` e `.js`/`.mjs`/`.cjs` → `JavaScriptReducer`.
 
 ---
 
@@ -101,6 +115,8 @@ Comunicação via JSON estruturado em `ws://127.0.0.1:8765`.
 }
 ```
 
+* `id` é um UUIDv4 gerado pelo CLI a cada envio; `provider` ∈ `gemini|claude|chatgpt|copilot`.
+
 ### 4.2. Payload: Extensão -> CLI (`RESPONSE`)
 
 ```json
@@ -110,14 +126,17 @@ Comunicação via JSON estruturado em `ws://127.0.0.1:8765`.
   "action": "RESPONSE",
   "status": "SUCCESS",
   "payload": {
-    "rawResponse": "{
-  "file_path": "src/legacy_calculator.php",
-  "action": "replace",
-  ... 
-}"
+    "rawResponse": "{ \"file_path\": \"src/legacy_calculator.php\", \"action\": \"replace_symbol\", ... }"
   }
 }
 ```
+
+### 4.3. Correlação e Segurança (implementação vigente)
+
+* **Correlação:** o CLI mantém um *future* por `id` e resolve a resposta casando `RESPONSE.id` com o `SEND_PROMPT.id`. **Fallback tolerante:** se a resposta não trouxer `id` e houver exatamente uma requisição pendente, ela resolve essa requisição (compatibilidade com extensões antigas). A extensão nova **deve** ecoar o `id`.
+* **Validação de Origin (RNF-02):** o servidor fecha com código **1008** conexões cujo header `Origin` não esteja na allowlist: prefixos `chrome-extension://` e `moz-extension://`, e as origens `https://gemini.google.com`, `https://claude.ai`, `https://chatgpt.com`, `https://chat.openai.com` e `https://copilot.microsoft.com` (constantes em `cli/server.py`).
+* **Ciclo de conexão:** o CLI aguarda a extensão via `asyncio.Event` (`wait_for_extension()`), sem polling nem `sleep` fixo.
+* **Timeout:** `send_prompt_and_wait(prompt, provider, timeout=180.0)` levanta `TimeoutError` se o LLM não responder no prazo.
 
 ---
 
@@ -140,14 +159,22 @@ Para evitar que o LLM responda com textos conversacionais, todo prompt conterá 
 }
 ```
 
+**Notas de implementação (vigentes):**
+* `target_symbol` é opcional no schema, mas **obrigatório** quando `action = "replace_symbol"` (validado pelo applier).
+* O applier tolera prosa e cercas ```` ```json ```` ao redor do JSON (extrai o primeiro objeto JSON balanceado via `raw_decode`).
+* Semântica de `code_content` por ação:
+  * `create_file` → conteúdo completo do arquivo;
+  * `replace_symbol` → definição completa e atualizada do símbolo-alvo (aplicada por byte-range Tree-Sitter, com re-parse de validação antes de gravar);
+  * `patch_diff` → unified diff aplicado com checagem estrita de contexto.
+
 ---
 
 ## 6. Requisitos Não-Funcionais (RNFs)
 
-* **RNF-01 (Performance):** O tempo gasto pelo CLI no parsing de AST e geração de esqueletos não deve exceder **200ms** para arquivos de até 5.000 linhas.
-* **RNF-02 (Segurança Local):** O servidor WebSocket local aceitará conexões exclusivamente da interface `127.0.0.1` e validará chamadas via `Origin` header.
-* **RNF-03 (Resiliência):** Caso a extensão perca a conexão WebSocket, tentativas de reconexão (*Exponential Backoff*) devem ocorrer sem travar a UI do navegador.
-* **RNF-04 (Atomicidade):** Em caso de falha no parse do JSON retornado pelo LLM, o CLI **não deve modificar** nenhum arquivo local e deve solicitar uma autocorreção (*retry prompt*).
+* **RNF-01 (Performance):** ✅ Parsing de AST e geração de esqueletos em **< 200ms** para arquivos de até 5.000 linhas. *Medido: ~97 ms em arquivo PHP de 5.505 linhas.*
+* **RNF-02 (Segurança Local):** ✅ Servidor aceita conexões exclusivamente em `127.0.0.1` e valida o header `Origin` contra a allowlist (§4.3), rejeitando com close `1008`.
+* **RNF-03 (Resiliência):** ⏳ *Pertence à extensão (próxima iteração).* Reconexão com *Exponential Backoff* sem travar a UI do navegador.
+* **RNF-04 (Atomicidade):** ✅ Falha no parse/validação do JSON do LLM ⇒ **nenhum** arquivo é modificado (escrita atômica via arquivo temporário + `os.replace`) e o CLI envia prompt de autocorreção com o erro, até `--max-retries` tentativas (padrão 3).
 
 ---
 
@@ -155,263 +182,128 @@ Para evitar que o LLM responda com textos conversacionais, todo prompt conterá 
 
 ```text
 capoeira-code/
-├── cli/
+├── cli/                            # ✅ implementado
 │   ├── __init__.py
-│   ├── main.py                  # Ponto de entrada do CLI (Click)
-│   ├── server.py                # Servidor WebSocket local
-│   ├── applier.py               # Aplicador atômico do JSON do LLM
+│   ├── __main__.py                 # habilita `python -m cli` (executar da raiz)
+│   ├── main.py                     # CLI (Click): comando `refactor`, prompt c/ schema (§5), retry (RNF-04)
+│   ├── server.py                   # Servidor WebSocket local (allowlist Origin, correlação por id, timeout)
+│   ├── applier.py                  # Aplicador atômico: create_file | replace_symbol | patch_diff
 │   └── reducers/
-│       ├── __init__.py
-│       ├── base.py              # Interface abstrata para parsers
-│       ├── tree_sitter_php.py   # Redutor de contexto para PHP
-│       └── tree_sitter_js.py    # Redutor de contexto para JavaScript
-├── extension/
-│   ├── manifest.json            # Chrome Extension Manifest V3
-│   ├── content.js               # Script de injeção no DOM e cliente WS
+│       ├── __init__.py             # get_reducer_for_path(): .php, .js, .mjs, .cjs
+│       ├── base.py                 # BaseLanguageReducer + OMISSION_PLACEHOLDER
+│       ├── tree_sitter_php.py      # Redutor de contexto para PHP
+│       └── tree_sitter_js.py       # Redutor de contexto para JavaScript
+├── tests/                          # ✅ 30 testes pytest (sem pytest-asyncio; asyncio.run in-process)
+│   ├── fixtures/                   # legacy_calculator.php, dashboard.js
+│   ├── test_reducers_php.py
+│   ├── test_reducers_js.py
+│   ├── test_applier.py
+│   └── test_server.py
+├── extension/                      # ⏳ próxima iteração (MV3) — ver §8.2
+│   ├── manifest.json
+│   ├── content.js
 │   └── adapters/
-│       ├── gemini.js            # Adaptador de seletores para o Gemini
-│       └── claude.js            # Adaptador de seletores para o Claude
-├── requirements.txt             # Dependências Python do CLI
+│       ├── gemini.js
+│       └── claude.js
+├── specs/capoeira-code-spec.md     # este arquivo
+├── requirements.txt                # dependências de runtime
+├── requirements-dev.txt            # -r requirements.txt + pytest
+├── conftest.py                     # sys.path para `import cli` nos testes
+├── AGENTS.md
 └── README.md
 ```
 
 ---
 
-## 8. Código-Fonte Esqueleto dos Módulos Principais
+## 8. Código-Fonte e Interfaces dos Módulos Principais
 
-### 8.1. CLI & Servidor (Python)
+### 8.1. CLI & Servidor (Python) — estado implementado
+
+> O código-fonte no repositório é canônico; esta seção documenta as interfaces e as
+> decisões que **divergem do esqueleto original da v1.0.0** (não regredir).
 
 #### `requirements.txt`
 ```text
 websockets>=12.0
-tree-sitter>=0.22.0
-tree-sitter-languages>=1.10.0
+tree-sitter>=0.24
+tree-sitter-php>=0.23
+tree-sitter-javascript>=0.23
 click>=8.1.7
 pydantic>=2.7.0
 ```
 
-#### `cli/reducers/base.py`
+> **Desvio consolidado:** o pacote `tree-sitter-languages` (citado na v1.0.0) está
+> abandonado e **não possui wheel para Python 3.13**. Usam-se os pacotes oficiais
+> por gramática. Construção do parser:
+>
+> ```python
+> from tree_sitter import Language, Parser
+> import tree_sitter_php, tree_sitter_javascript
+>
+> php_lang = Language(tree_sitter_php.language_php())   # arquivos .php (aceita HTML misto)
+> php_parser = Parser(php_lang)
+> js_lang = Language(tree_sitter_javascript.language()) # arquivos .js/.mjs/.cjs
+> js_parser = Parser(js_lang)
+> ```
+
+> **API tree-sitter 0.26:** não existem `Node.sexp()` nem `Query.captures()`.
+> Usar `str(node)` para s-expressions e `QueryCursor(Query(lang, scm))`, que oferece
+> `.matches(root)` → `[(pattern_idx, {capture: [Node, ...]})]` e
+> `.captures(root)` → `{capture: [Node, ...]}`.
+
+#### `cli/server.py` (interface)
 ```python
-from abc import ABC, abstractmethod
-
-class BaseLanguageReducer(ABC):
-    """Interface base para os adaptadores de linguagem baseados em Tree-Sitter."""
-
-    @abstractmethod
-    def extract_skeleton(self, code_content: str, target_symbol: str) -> str:
-        """
-        Retorna o código reduzido, omitindo corpos de funções/métodos irrelevantes
-        e preservando o corpo do target_symbol.
-        """
-        pass
-
-    @abstractmethod
-    def extract_dependencies(self, code_content: str) -> list[str]:
-        """Extrai nomes de arquivos ou módulos importados no arquivo atual."""
-        pass
+class CapoeiraServer:
+    def __init__(self, host: str = "127.0.0.1", port: int = 8765): ...
+    async def handler(self, websocket): ...          # fecha 1008 se Origin fora da allowlist
+    async def wait_for_extension(self, timeout: float | None = None) -> None: ...
+    async def send_prompt_and_wait(
+        self, prompt: str, provider: str = "gemini", timeout: float = 180.0
+    ) -> str: ...                                     # retorna payload.rawResponse
+    async def start(self): ...                        # websockets.serve(...)
 ```
 
-#### `cli/reducers/tree_sitter_php.py`
+#### `cli/applier.py` (interface)
 ```python
-from tree_sitter_languages import get_parser, get_language
-from .base import BaseLanguageReducer
+class CapoeiraResponse(BaseModel):   # pydantic v2 — espelha o schema da §5
+    file_path: str
+    action: Literal["replace_symbol", "create_file", "patch_diff"]
+    target_symbol: str | None = None
+    code_content: str
+    explanation: str = ""
 
-class PHPReducer(BaseLanguageReducer):
-    def __init__(self):
-        self.language_name = "php"
-        self.parser = get_parser(self.language_name)
-        self.language = get_language(self.language_name)
-
-    def extract_skeleton(self, code_content: str, target_symbol: str) -> str:
-        tree = self.parser.parse(bytes(code_content, "utf8"))
-        
-        query_scm = """
-        (method_declaration name: (name) @func_name body: (compound_statement) @func_body) @func_node
-        (function_definition name: (name) @func_name body: (compound_statement) @func_body) @func_node
-        """
-        query = self.language.query(query_scm)
-        captures = query.captures(tree.root_node)
-
-        functions = []
-        current_func = {}
-        
-        for node, capture_name in captures:
-            if capture_name == "func_node":
-                current_func = {"node": node}
-                functions.append(current_func)
-            elif capture_name == "func_name":
-                current_func["name"] = code_content[node.start_byte:node.end_byte]
-            elif capture_name == "func_body":
-                current_func["body"] = node
-
-        lines = code_content.splitlines()
-        modified_lines = list(lines)
-
-        for func in reversed(functions):
-            name = func.get("name")
-            body_node = func.get("body")
-            if not body_node:
-                continue
-
-            start_row, start_col = body_node.start_point
-            end_row, end_col = body_node.end_point
-
-            if name != target_symbol:
-                indent = " " * start_col
-                placeholder = f"{indent}{{\n{indent}    // ... [Omitted by CapoeiraCode] ...\n{indent}}}"
-                modified_lines[start_row:end_row + 1] = [placeholder]
-
-        return "\n".join(modified_lines)
-
-    def extract_dependencies(self, code_content: str) -> list[str]:
-        return []
-```
-
-#### `cli/applier.py`
-```python
-import json
-import os
-from pydantic import BaseModel, Field
-
-class CapoeiraResponse(BaseModel):
-    file_path: str = Field(description="Caminho do arquivo a ser modificado")
-    action: str = Field(description="Ação: replace_symbol, create_file")
-    code_content: str = Field(description="O novo código do símbolo ou arquivo")
-    explanation: str = Field(default="", description="Resumo da alteração")
+@dataclass
+class ApplyResult:
+    ok: bool
+    message: str = ""
+    error: str = ""
+    payload: CapoeiraResponse | None = None
 
 class ChangeApplier:
     @staticmethod
-    def apply_payload(raw_json_str: str) -> bool:
-        try:
-            clean_json = raw_json_str.strip()
-            if "```json" in clean_json:
-                clean_json = clean_json.split("```json")[1].split("```")[0].strip()
-            
-            data = json.loads(clean_json)
-            payload = CapoeiraResponse(**data)
-            
-            os.makedirs(os.path.dirname(os.path.abspath(payload.file_path)), exist_ok=True)
-            with open(payload.file_path, "w", encoding="utf-8") as f:
-                f.write(payload.code_content)
-            
-            print(f"[Applier] Alteração aplicada em {payload.file_path}: {payload.explanation}")
-            return True
+    def apply_payload(raw_json_str: str) -> ApplyResult: ...  # nunca levanta exceção
 
-        except Exception as e:
-            print(f"[Applier Error] Falha ao aplicar alteração: {e}")
-            return False
+def apply_unified_diff(original: str, diff: str) -> str: ...  # ValueError se contexto não confere
 ```
 
-#### `cli/server.py`
-```python
-import asyncio
-import json
-import websockets
+* **`replace_symbol`** localiza o símbolo via `find_symbol_range` e aplica *splice* por
+  byte-range UTF-8 — **não** sobrescreve o arquivo inteiro (o esqueleto v1.0.0 faria isso).
+  O resultado é re-parseado; havendo erro de sintaxe, nada é gravado.
+* **Escrita atômica:** grava em `<arquivo>.capoeira.tmp` e finaliza com `os.replace`.
 
-class CapoeiraServer:
-    def __init__(self, host="127.0.0.1", port=8765):
-        self.host = host
-        self.port = port
-        self.active_socket = None
-        self.response_future = None
-
-    async def handler(self, websocket):
-        self.active_socket = websocket
-        print("\n[CapoeiraCode Bridge] Extensão conectada!")
-        try:
-            async for message in websocket:
-                data = json.loads(message)
-                if data.get("action") == "RESPONSE":
-                    if self.response_future and not self.response_future.done():
-                        self.response_future.set_result(data.get("payload"))
-        except websockets.exceptions.ConnectionClosed:
-            print("\n[CapoeiraCode Bridge] Conexão encerrada.")
-            self.active_socket = None
-
-    async def send_prompt_and_wait(self, prompt: str) -> str:
-        if not self.active_socket:
-            raise ConnectionError("Nenhuma extensão conectada via WebSocket.")
-
-        payload = {
-            "version": "1.0",
-            "action": "SEND_PROMPT",
-            "payload": {
-                "prompt": prompt,
-                "systemPrompt": "Você é o motor CapoeiraCode. Responda APENAS em formato JSON válido."
-            }
-        }
-
-        loop = asyncio.get_running_loop()
-        self.response_future = loop.create_future()
-        
-        await self.active_socket.send(json.dumps(payload))
-        print("[CapoeiraCode CLI] Prompt enviado. Aguardando processamento...")
-
-        response_payload = await self.response_future
-        return response_payload.get("rawResponse", "")
-
-    async def start(self):
-        return await websockets.serve(self.handler, self.host, self.port)
+#### `cli/main.py` (interface)
 ```
-
-#### `cli/main.py`
-```python
-import asyncio
-import click
-from reducers.tree_sitter_php import PHPReducer
-from server import CapoeiraServer
-from applier import ChangeApplier
-
-server = CapoeiraServer()
-
-@click.group()
-def cli():
-    """CapoeiraCode CLI - Agente para desenvolvimento e refatoração em sistemas legados."""
-    pass
-
-@cli.command()
-@click.option('--file', required=True, help="Caminho do arquivo legado")
-@click.option('--symbol', required=True, help="Nome do método/função alvo")
-@click.option('--instruction', required=True, help="O que deve ser alterado/refatorado")
-def refactor(file: str, symbol: str, instruction: str):
-    """Reduz o contexto do arquivo via AST e solicita a alteração ao LLM."""
-    
-    async def run():
-        with open(file, "r", encoding="utf-8") as f:
-            code = f.read()
-
-        reducer = PHPReducer()
-        reduced_code = reducer.extract_skeleton(code, target_symbol=symbol)
-
-        prompt = f"""INSTRUÇÃO: {instruction}
-SÍMBOLO ALVO: {symbol}
-CAMINHO DO ARQUIVO: {file}
-
-ESQUELETO DO CÓDIGO DO PROJETO:
-{reduced_code}
-
-Retorne um JSON com a propriedade "code_content" contendo o código atualizado.
-"""
-
-        async with await server.start():
-            await asyncio.sleep(2)
-            raw_response = await server.send_prompt_and_wait(prompt)
-            success = ChangeApplier.apply_payload(raw_response)
-            
-            if success:
-                click.echo(click.style("Refatoração concluída com sucesso!", fg="green"))
-            else:
-                click.echo(click.style("Falha ao aplicar alterações.", fg="red"))
-
-    asyncio.run(run())
-
-if __name__ == "__main__":
-    cli()
+python -m cli refactor --file ARQUIVO --symbol SIMBOLO --instruction "TEXTO"
+                       [--provider gemini|claude|chatgpt|copilot]  (padrão: gemini)
+                       [--timeout SEGUNDOS]                        (padrão: 180)
+                       [--max-retries N]                           (padrão: 3)
 ```
+* Monta o prompt com o schema da §5 injetado; em falha de aplicação, reenvia prompt de
+  autocorreção com a mensagem de erro (RNF-04). Exit code `0` em sucesso, `1` em falha.
 
----
+### 8.2. Extensão Web (Chrome MV3) — planejada (próxima iteração)
 
-### 8.2. Extensão Web (Chrome MV3)
+> Esqueletos mantidos da v1.0.0, com os **ajustes obrigatórios** listados ao final.
 
 #### `extension/manifest.json`
 ```json
@@ -435,104 +327,40 @@ if __name__ == "__main__":
         "*://gemini.google.com/*",
         "*://copilot.microsoft.com/*"
       ],
-      "js": ["adapters/gemini.js", "content.js"]
+      "js": ["adapters/gemini.js", "adapters/claude.js", "content.js"]
     }
   ]
 }
 ```
 
-#### `extension/adapters/gemini.js`
+#### Contrato dos adaptadores (`extension/adapters/*.js`)
 ```javascript
-window.CapoeiraGeminiAdapter = {
-  name: "gemini",
-  match: () => window.location.hostname.includes("gemini.google.com"),
-  
-  getSelectors: () => ({
-    input: '.input-area div[contenteditable="true"], textarea',
-    submit: 'button[aria-label*="Enviar"], button.send-button',
-    stopButton: 'button[aria-label*="Parar"], .stop-generating-icon',
-    responses: '.model-response-text, message-content'
-  }),
-
-  async injectAndSend(promptText) {
-    const sel = this.getSelectors();
-    const inputEl = document.querySelector(sel.input);
-    if (!inputEl) throw new Error("Input do Gemini não encontrado.");
-
-    inputEl.focus();
-    document.execCommand('insertText', false, promptText);
-    inputEl.dispatchEvent(new Event("input", { bubbles: true }));
-
-    await new Promise(r => setTimeout(r, 400));
-    
-    const submitBtn = document.querySelector(sel.submit);
-    if (submitBtn) submitBtn.click();
-  }
+window.CapoeiraXxxAdapter = {
+  name: "gemini",                       // ou "claude"
+  match: () => boolean,                 // true se a página atual é do provider
+  getSelectors: () => ({ input, submit, stopButton, responses }),
+  async injectAndSend(promptText) { ... }
 };
 ```
 
-#### `extension/content.js`
-```javascript
-(function () {
-  const WS_URL = "ws://127.0.0.1:8765";
-  let socket = null;
+#### `extension/content.js` (fluxo)
+1. Conecta em `ws://127.0.0.1:8765`.
+2. Ao receber `SEND_PROMPT`: seleciona o adaptador compatível via `match()`,
+   injeta `systemPrompt + "\n\n" + prompt` e aguarda o fim da geração
+   (ausência do `stopButton`).
+3. Envia `RESPONSE` com o texto da última resposta.
 
-  function getActiveAdapter() {
-    if (window.CapoeiraGeminiAdapter && window.CapoeiraGeminiAdapter.match()) {
-      return window.CapoeiraGeminiAdapter;
-    }
-    return null;
-  }
+**Ajustes obrigatórios em relação ao esqueleto v1.0.0:**
+* `content.js` **deve ecoar o `id`** recebido no `SEND_PROMPT` ao montar a `RESPONSE` (§4.3).
+* Reconexão deve usar **Exponential Backoff** (ex.: 1s → 2s → … → teto de 30s), não o `setTimeout(connect, 3000)` fixo do esqueleto (RNF-03).
+* O `manifest.json` deve carregar **todos** os adaptadores antes de `content.js`.
+* O WebSocket da content script envia `Origin` da página do LLM ou da extensão — ambas as formas já constam na allowlist do servidor (§4.3), não é necessário alterar o CLI.
 
-  function connect() {
-    socket = new WebSocket(WS_URL);
+---
 
-    socket.onopen = () => {
-      console.log("[CapoeiraCode Bridge] Conectado ao CLI local.");
-    };
+## 9. Registro de Alterações
 
-    socket.onmessage = async (event) => {
-      const data = JSON.parse(event.data);
-      
-      if (data.action === "SEND_PROMPT") {
-        const adapter = getActiveAdapter();
-        if (!adapter) {
-          console.error("[CapoeiraCode Bridge] Nenhum adaptador compatível.");
-          return;
-        }
-
-        const fullPrompt = `${data.payload.systemPrompt}\n\n${data.payload.prompt}`;
-        await adapter.injectAndSend(fullPrompt);
-        waitForCompletion(adapter);
-      }
-    };
-
-    socket.onclose = () => {
-      setTimeout(connect, 3000);
-    };
-  }
-
-  function waitForCompletion(adapter) {
-    const interval = setInterval(() => {
-      const sel = adapter.getSelectors();
-      const isGenerating = !!document.querySelector(sel.stopButton);
-
-      if (!isGenerating) {
-        clearInterval(interval);
-        const responseNodes = document.querySelectorAll(sel.responses);
-        if (responseNodes.length > 0) {
-          const lastResponse = responseNodes[responseNodes.length - 1].innerText;
-          
-          socket.send(JSON.stringify({
-            action: "RESPONSE",
-            status: "SUCCESS",
-            payload: { rawResponse: lastResponse }
-          }));
-        }
-      }
-    }, 1000);
-  }
-
-  connect();
-})();
-```
+| Versão | Data | Descrição |
+| --- | --- | --- |
+| `1.0.0` | 18/08/2026 | Aprovação inicial da especificação. |
+| `1.1.0` | 20/08/2026 | **Iteração 1 (CLI) entregue** — 30 testes pytest verdes. Desvios consolidados: (1) `tree-sitter-languages` substituído por `tree-sitter` + gramáticas oficiais (sem wheel p/ Python 3.13); (2) migração para a API tree-sitter 0.26 (`QueryCursor`); (3) `BaseLanguageReducer` ganhou `find_symbol_range`/`has_parse_errors` e a §3.2 passou de TypeScript para Python; (4) `applier` reescrito: extração robusta de JSON, 3 ações, escrita atômica (RNF-04); (5) `server` com allowlist de Origin (RNF-02), `asyncio.Event`, correlação por `id` e timeout; (6) `main.py` com entrypoint `python -m cli` e loop de autocorreção; (7) RNFs 01, 02 e 04 verificados; RNF-03 alocado à extensão; (8) repositório git inicializado. |

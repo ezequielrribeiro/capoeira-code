@@ -3,7 +3,7 @@
 ## Estado do repositório
 
 - **Iteração 1 concluída**: o CLI Python existe e está testado. A **extensão Chrome (`extension/`) ainda não existe** — não procure por ela nem assuma E2E funcional.
-- Fonte da verdade: `specs/capoeira-code-spec.md` (pt-BR, v1.0.0 "Approved"). Contratos de protocolo/schema vêm de lá; quando o esqueleto da spec divergir da necessidade real, o código atual manda (ver "Desvios" abaixo).
+- Fonte da verdade: `specs/capoeira-code-spec.md` (pt-BR, v1.1.0 — já reconciliada com a Iteração 1; §9 lista os desvios consolidados). Contratos de protocolo/schema vêm de lá; detalhes de implementação, o código manda.
 - Documentação e strings visíveis ao usuário são em **pt-BR**.
 
 ## Comandos (Windows, a partir da raiz)
@@ -18,7 +18,7 @@ python -m venv .venv
 ```
 
 - Rode sempre via `.\.venv\Scripts\python.exe` (o venv **não** está no PATH) e sempre da raiz (`cli` é pacote com imports relativos; `python -m cli` não funciona de dentro de `cli/`).
-- Não há git, CI, linter ou formatter configurados — `pytest` verde é a barreira.
+- Repositório git inicializado (branch `master`, commit inicial da Iteração 1). Não há CI, linter ou formatter configurados — `pytest` verde é a barreira. Não commite sem pedido explícito.
 
 ## Desvios da spec já consolidados (não "corrigir" de volta)
 
