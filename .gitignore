@@ -1,0 +1,10 @@
+# Ambiente virtual
+.venv/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Arquivos temporários da escrita atômica do applier
+*.capoeira.tmp
