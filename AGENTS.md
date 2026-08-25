@@ -29,7 +29,7 @@ python -m venv .venv
 
 ## Contratos que não podem derivar
 
-- Placeholder exato: `// ... [Omitted by CapoeiraCode] ...` (constante `OMISSION_PLACEHOLDER` em `cli/reducers/base.py`).
+- Placeholder exato (token de comentário por linguagem): `// ... [Omitted by CapoeiraCode] ...` (`OMISSION_PLACEHOLDER`) para PHP/JS e `# ... [Omitted by CapoeiraCode] ...` (`PYTHON_OMISSION_PLACEHOLDER`) para Python — ambas em `cli/reducers/base.py`.
 - WS: bind só em `127.0.0.1:8765`; allowlist de origens em `cli/server.py` (`chrome-extension://`, `moz-extension://` + origens https dos 4 providers).
 - Schema LLM (§5): obrigatórios `file_path`, `action` ∈ `replace_symbol|create_file|patch_diff`, `code_content`.
 - RNF-04: falha de parse/validação ⇒ **nada** é escrito (escrita atômica via tmp + `os.replace`) e o CLI envia prompt de autocorreção (máx. `--max-retries`, padrão 3).

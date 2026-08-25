@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from tree_sitter import Query, QueryCursor
 
 OMISSION_PLACEHOLDER = "// ... [Omitted by CapoeiraCode] ..."
+PYTHON_OMISSION_PLACEHOLDER = "# ... [Omitted by CapoeiraCode] ..."
 
 
 class BaseLanguageReducer(ABC):

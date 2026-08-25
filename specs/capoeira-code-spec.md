@@ -63,9 +63,10 @@ Sistemas legados possuem bases de código extensas, acopladas e com pouco suport
 * **Linguagens:**
   * **PHP** ✅ — Extração de métodos, classes e resolução de `require`/`include`/`require_once`/`include_once` e `use` (namespaces).
   * **JavaScript** ✅ — `function_declaration`, `generator_function_declaration`, `method_definition`, arrow functions e `function_expression` em declaradores; dependências via `import` e `require(...)`.
+  * **Python** ✅ — `function_definition` (cobre `def`, `async def` e métodos de classe); dependências via `import_statement` e `import_from_statement`.
   * **HTML** ⏳ — Seleção semântica de nós (planejado).
   * **CSS** ⏳ — Isolação de seletores relacionados a componentes específicos (planejado).
-* **Regra de Omissão:** Qualquer bloco de código fora do símbolo-alvo (*target symbol*) é substituído pelo placeholder exato `// ... [Omitted by CapoeiraCode] ...` (constante `OMISSION_PLACEHOLDER` em `cli/reducers/base.py`), preservando a indentação original do bloco.
+* **Regra de Omissão (token de comentário por linguagem):** Qualquer bloco de código fora do símbolo-alvo (*target symbol*) é substituído pelo placeholder exato no token de comentário da linguagem — `// ... [Omitted by CapoeiraCode] ...` (`OMISSION_PLACEHOLDER`) para PHP/JS e `# ... [Omitted by CapoeiraCode] ...` (`PYTHON_OMISSION_PLACEHOLDER`) para Python — ambos em `cli/reducers/base.py`. No Python (delimitado por indentação, sem chaves) o `PythonReducer` sobrescreve `_replace_bodies` para omitir o corpo como um comentário `# ...` no nível de indentação do bloco.
 
 ### 3.2. Interface de Redutores (Language Plugin Interface)
 
@@ -189,14 +190,16 @@ capoeira-code/
 │   ├── server.py                   # Servidor WebSocket local (allowlist Origin, correlação por id, timeout)
 │   ├── applier.py                  # Aplicador atômico: create_file | replace_symbol | patch_diff
 │   └── reducers/
-│       ├── __init__.py             # get_reducer_for_path(): .php, .js, .mjs, .cjs
-│       ├── base.py                 # BaseLanguageReducer + OMISSION_PLACEHOLDER
+│       ├── __init__.py             # get_reducer_for_path(): .php, .js, .mjs, .cjs, .py
+│       ├── base.py                 # BaseLanguageReducer + OMISSION_PLACEHOLDER + PYTHON_OMISSION_PLACEHOLDER
 │       ├── tree_sitter_php.py      # Redutor de contexto para PHP
-│       └── tree_sitter_js.py       # Redutor de contexto para JavaScript
-├── tests/                          # ✅ 30 testes pytest (sem pytest-asyncio; asyncio.run in-process)
-│   ├── fixtures/                   # legacy_calculator.php, dashboard.js
+│       ├── tree_sitter_js.py       # Redutor de contexto para JavaScript
+│       └── tree_sitter_python.py   # Redutor de contexto para Python
+├── tests/                          # ✅ 39 testes pytest (sem pytest-asyncio; asyncio.run in-process)
+│   ├── fixtures/                   # legacy_calculator.php, dashboard.js, legacy_service.py
 │   ├── test_reducers_php.py
 │   ├── test_reducers_js.py
+│   ├── test_reducers_python.py
 │   ├── test_applier.py
 │   └── test_server.py
 ├── extension/                      # ⏳ próxima iteração (MV3) — ver §8.2

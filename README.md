@@ -11,7 +11,7 @@ A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoei
 
 | Componente | Status |
 | --- | --- |
-| CLI Python (reducers PHP/JS, servidor WS, applier) | ✅ Implementado e testado |
+| CLI Python (reducers PHP/JS/Python, servidor WS, applier) | ✅ Implementado e testado |
 | Extensão Chrome MV3 (`extension/`) | ⏳ Próxima iteração |
 | Reducers HTML/CSS | ⏳ Futuro |
 
@@ -64,7 +64,7 @@ cli/
 ├── main.py        # Click: comando `refactor`, montagem do prompt com schema (spec §5), retry RNF-04
 ├── server.py      # WebSocket ws://127.0.0.1:8765; allowlist de Origin (RNF-02); correlação por id
 ├── applier.py     # Pydantic + ações create_file / replace_symbol / patch_diff; escrita atômica
-└── reducers/      # Tree-Sitter PHP/JS: extract_skeleton, extract_dependencies, find_symbol_range
+└── reducers/      # Tree-Sitter PHP/JS/Python: extract_skeleton, extract_dependencies, find_symbol_range
 ```
 
 Contratos estáveis (não mudar sem atualizar a spec):
