@@ -128,3 +128,63 @@ def build_run_prompt(
     sections.append(f"## INSTRUÇÃO\n{instruction.strip()}")
     sections.append(f"## CONTRATO DE RESPOSTA\n{RUN_RESPONSE_CONTRACT}")
     return "\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
+# Modo agente (TUI interativa): contrato de ferramentas (steps)
+# ---------------------------------------------------------------------------
+TOOLS_CONTRACT = """Você é o motor CapoeiraCode em MODO AGENTE interativo de desenvolvimento.
+
+Para cada turno, responda SEMPRE com um único JSON contendo uma lista de passos:
+
+{
+  "steps": [
+    { "tool": "read_file",  "path": "app/views/vagas.php", "lines": [1, 120] },
+    { "tool": "list_dir",   "path": "app" },
+    { "tool": "run_shell",  "cmd": "php -l app/views/vagas.php" },
+    { "tool": "run_python", "code": "import os; print(os.listdir('.'))" },
+    { "tool": "write_file", "path": "app/models/Db.php", "action": "replace_symbol",
+      "target_symbol": "conectar", "code_content": "..." },
+    { "tool": "ask_user",   "question": "Qual o nome da tela?" },
+    { "tool": "done",       "message": "Resumo do que foi feito" }
+  ]
+}
+
+Semântica das ferramentas:
+- read_file: lê um arquivo do projeto (opcionalmente um intervalo de linhas 1-based).
+- list_dir: lista um diretório do projeto.
+- run_shell: executa um comando shell no diretório do projeto (ex.: lint, testes, git).
+- run_python: executa trechos de Python no diretório do projeto (ex.: inspecionar schema).
+- write_file: modifica o projeto. action ∈ create_file | replace_symbol | patch_diff;
+  target_symbol obrigatório em replace_symbol; patch_diff usa unified diff.
+- ask_user: faz uma pergunta ao usuário (use quando faltar informação essencial).
+- done: encerra o turno de desenvolvimento. Inclua um resumo objetivo do que foi feito.
+
+Regras:
+- "tool" é obrigatório em todo passo; ignore chaves extras.
+- Prefira ler arquivos antes de alterá-los; altere o MÍNIMO necessário.
+- Caminhos relativos partem da raiz do projeto.
+- Agrupe alterações relacionadas em write_file sequenciais; nunca desative os padrões
+  de segurança do projeto (escaping, acesso a banco via camadas).
+- Não invente conteúdo de arquivo que não leu; use as ferramentas.
+- Se precisar da mesma informação repetidamente, não a re-leia: use o contexto da última
+  resposta da ferramenta.
+- Sempre finalize o turno com um passo "done" quando a tarefa estiver concluída."""
+
+
+def build_agent_system_prompt(
+    profile: str,
+    specs: str = "",
+    skills: str = "",
+    artifacts: str = "",
+) -> str:
+    """System prompt do agente (TUI): perfil + specs + skills + artefatos + contrato."""
+    sections = [f"## PERFIL DO PROJETO\n{profile.strip() or '(sem projeto configurado)'}"]
+    if specs:
+        sections.append(f"## ESPECIFICAÇÕES / PADRÕES DO SISTEMA\n{specs}")
+    if skills:
+        sections.append(f"## PROCEDIMENTOS (SKILLS)\n{skills}")
+    if artifacts:
+        sections.append(f"## ARTEFATOS DO PROJETO (scan local)\n{artifacts}")
+    sections.append(f"## CONTRATO DE RESPOSTA (ferramentas)\n{TOOLS_CONTRACT}")
+    return "\n\n".join(sections)

@@ -1,4 +1,5 @@
 import difflib
+import os
 import sys
 
 import click
@@ -480,6 +481,22 @@ def ask(query, project, doc_type):
         click.echo("\nOperação cancelada pelo usuário.")
         success = False
     sys.exit(0 if success else 1)
+
+
+@cli.command("tui")
+@click.argument("path", required=False, type=click.Path(file_okay=False))
+@click.option("--project", default=None, help="Projeto (premissas projects/<nome>.yaml)")
+@click.option("--readonly", is_flag=True, help="Proscreve execução/escrita (somente leitura)")
+@click.option("--model", default=None, help="Modelo/perfil do backend")
+@click.option("--base-url", default=None, help="Base URL do backend compatível com Ollama")
+def tui(path, project, readonly, model, base_url):
+    """Modo agente interativo (TUI) na raiz do projeto — semelhante ao OpenCode."""
+    from .tui.app import run_tui
+
+    try:
+        run_tui(path or os.getcwd(), project=project, readonly=readonly, model=model, base_url=base_url)
+    except KeyboardInterrupt:
+        click.echo("\nOperação cancelada pelo usuário.")
 
 
 @cli.command()

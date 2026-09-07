@@ -5,3 +5,5 @@ tree-sitter-python>=0.23
 click>=8.1.7
 pydantic>=2.7.0
 PyYAML>=6.0
+prompt_toolkit>=3.0
+rich>=13.7

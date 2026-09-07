@@ -38,6 +38,15 @@ class LLMClient:
                 {"role": "user", "content": prompt},
             ],
         }
+        return self.chat_messages(body["messages"])
+
+    def chat_messages(self, messages: list[dict]) -> str:
+        """Envia uma conversa (roles system/user/assistant) e retorna a resposta."""
+        body = {
+            "model": self.model,
+            "stream": False,
+            "messages": messages,
+        }
         request = urllib.request.Request(
             f"{self.base_url}/api/chat",
             data=json.dumps(body).encode("utf8"),

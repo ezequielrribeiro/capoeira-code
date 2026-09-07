@@ -1,8 +1,8 @@
 # 📜 Software Specification & Implementation Architecture: CapoeiraCode
 
 **Projeto:** CapoeiraCode  
-**Versão:** `3.0.0`  
-**Status:** `Approved — Iteração 4 (motor de instrução + premissas por projeto) implementada e testada`  
+**Versão:** `4.0.0`  
+**Status:** `Approved — Iteração 5 (modo agente interativo/TUI com ferramentas) implementada e testada`  
 **Data:** 8 de Setembro de 2026  
 
 ---
@@ -20,6 +20,13 @@ A partir da v3.0.0 o CLI vira um **motor de instrução declarativo** (estilo Op
 especs/skills/prompts vivem em arquivos no diretório de config, e o LLM **decide a ação**
 sobre os arquivos do projeto (inclusive **lote multi-arquivo**), com base num perfil de
 **premissas por projeto** e, opcionalmente, contexto de um RAG local.
+
+Na v4.0.0 entra o **modo agente interativo (TUI)**: `capoeira [PATH]` abre uma interface
+textual (prompt_toolkit + rich) que cria um **workspace de sessão** por projeto, gera
+**artefatos de scan** (árvore, dependências, ASTs) e roda um **loop de desenvolvimento** em
+que o LLM responde com **passos de ferramentas** (`read_file`, `list_dir`, `run_shell`,
+`run_python`, `write_file`, `ask_user`, `done`) — leituras automáticas; escrita/execução
+seguem política de permissão — até a conclusão da tarefa.
 
 ### 1.2. Problema de Negócio
 Sistemas legados possuem bases extensas, acopladas e com pouca documentação. Rotinas como
@@ -71,6 +78,9 @@ espalhado e não automatizável com subcomandos rígidos.
 
 **Estado:** motor `run`, premissas por projeto, scanner de dependências, `ask` (RAG) e
 applier multi-arquivo implementados e testados; não há componente de navegador neste repo.
+Na v4.0.0, `capoeira [PATH]` inicia a **TUI** que: (a) cria `configs/<slug>/` no diretório
+de config com workspace de sessão; (b) gera artefatos de scan (`tree.txt`,
+`dependencies.json`, `asts/`); (c) roda o agente com ferramentas (item 5 da visão).
 
 ---
 
@@ -176,6 +186,34 @@ Todo prompt de mutação injeta o contrato de resposta. Duas formas aceitas:
 * `apply_payload(raw, expected_file_path=None)`: com `expected_file_path`, o formato único é obrigado a casar o caminho (postura do `generate`).
 * **Staging**: todas as ações são preparadas em memória (criações, splices de byte-range, diffs, re-parse); qualquer falha ⇒ `ApplyResult(ok=False)` e **nada** é gravado. Só após todas as validações os arquivos são escritos (tmp + `os.replace` por arquivo). *Isso estende a RNF-04 ao lote.*
 
+### 5.1. Contrato de ferramentas do modo agente (TUI, v4.0.0)
+
+No modo agente, o LLM responde a cada turno com `{"steps":[...]}` em vez do schema acima:
+
+```json
+{
+  "steps": [
+    { "tool": "read_file",  "path": "app/views/vagas.php", "lines": [1, 120] },
+    { "tool": "list_dir",   "path": "app" },
+    { "tool": "run_shell",  "cmd": "php -l app/views/vagas.php" },
+    { "tool": "run_python", "code": "import os; print(os.listdir('.'))" },
+    { "tool": "write_file", "path": "app/models/Db.php", "action": "replace_symbol",
+      "target_symbol": "conectar", "code_content": "..." },
+    { "tool": "ask_user",   "question": "Qual o nome da tela?" },
+    { "tool": "done",       "message": "Resumo do que foi feito" }
+  ]
+}
+```
+
+* `read_file`/`list_dir` são **leituras automáticas** (sem aprovação).
+* `run_shell`/`run_python` executam no **cwd do projeto** (`subprocess`), com timeout e
+  saída truncada (limite ~8.000 chars).
+* `write_file` aplica via **`ChangeApplier`** (atômico e multi-arquivo).
+* `ask_user` é bloqueante na TUI; a resposta vira contexto.
+* `done` encerra o turno; sem `done`, o loop itera até `--max-turns` (padrão 20) ou
+  interrupção (`Ctrl+C`).
+* Fragmento único (objeto com `tool`) também é aceito como atalho de um passo.
+
 ---
 
 ## 6. Requisitos Não-Funcionais (RNFs)
@@ -193,19 +231,26 @@ Todo prompt de mutação injeta o contrato de resposta. Duas formas aceitas:
 ```text
 capoeira-code/
 ├── cli/                            # ✅ implementado
-│   ├── main.py                     # Click: run | ask | refactor | generate | explain | deps
-│   ├── llm_client.py               # HTTP /api/chat (Ollama-compatível, urllib)
-│   ├── prompts.py                  # Builders de prompt + contrato do motor run (multi-arquivo)
+│   ├── entry.py                    # entry `capoeira`: PATH abre a TUI; subcomandos → Click
+│   ├── main.py                     # Click: run | ask | refactor | generate | explain | deps | tui
+│   ├── llm_client.py               # HTTP /api/chat (Ollama-compatível, urllib; chat_messages)
+│   ├── prompts.py                  # Builders de prompt; contrato multi-arquivo e steps (agente)
 │   ├── applier.py                  # Aplicador atômico multi-arquivo (stage/commit)
 │   ├── instruction/                # loader de specs/skills/prompts (+ render_project_profile)
 │   ├── project/                    # premises.py (yaml) + scanner.py (deps/tabelas)
 │   ├── rag_client.py               # subprocess -> local-rag-system
+│   ├── tui/                        # modo agente interativo
+│   │   ├── app.py                  # TUI prompt_toolkit + rich; /comandos (model, rescan, reset...)
+│   │   ├── session.py              # workspace configs/<slug>/ + session.jsonl (1 sessão ativa/projeto)
+│   │   ├── scan_artifacts.py       # gera tree.txt, dependencies.json, asts/
+│   │   ├── permissions.py          # política de permissão (leitura auto; ask/readonly/auto)
+│   │   ├── tools.py                # executores: read/list/run_shell/run_python/write_file
+│   │   └── agent.py                # loop do agente: steps → execução → até done/max_turns
 │   └── reducers/                   # Tree-Sitter PHP/JS/Python
-├── tests/                          # ✅ 86 testes pytest
-│   ├── fixtures/                   # legacy_calculator.php, dashboard.js, legacy_service.py
+├── tests/                          # ✅ 122 testes pytest
 │   ├── test_reducers_*.py          # PHP/JS/Python
 │   ├── test_applier.py
-│   ├── test_applier_multi.py       # lote multi-arquivo + staging
+│   ├── test_applier_multi.py
 │   ├── test_llm_client.py
 │   ├── test_cli.py                 # refactor/generate/explain/deps (LLM stubado)
 │   ├── test_cli_motor.py           # run/ask (LLM stubado + RAG mockado)
@@ -213,11 +258,18 @@ capoeira-code/
 │   ├── test_scanner.py
 │   ├── test_rag_client.py
 │   ├── test_instruction.py
-│   └── test_prompts.py
+│   ├── test_prompts.py
+│   ├── test_session.py
+│   ├── test_scan_artifacts.py
+│   ├── test_tools.py
+│   ├── test_permissions.py
+│   ├── test_agent.py
+│   └── test_entry.py
 ├── examples/capoeira-config.template/  # modelo de config (yaml + specs/skills/prompts)
 ├── specs/capoeira-code-spec.md     # este arquivo
-├── requirements.txt                # + PyYAML (sem websockets)
+├── requirements.txt                # + prompt_toolkit, rich
 ├── requirements-dev.txt
+├── pyproject.toml                  # entry `capoeira` (pip install -e .)
 ├── conftest.py
 ├── AGENTS.md
 └── README.md
@@ -290,6 +342,22 @@ ApplyResult: ok, message, error, payload(CapoeiraResponse|None), staged(dict|Non
 ```
 * `stage_payload` prepara tudo em memória; `commit_staged` grava (tmp + `os.replace`, criando diretórios). *Sem escrita parcial.*
 
+### 8.6. Modo agente/TUI (`cli/tui/`)
+* **`app.py` — `run_tui(project_path, project, readonly, model, base_url, timeout)`**: PromptSession (prompt_toolkit) + Console (rich); comandos `/model`, `/base-url`, `/premises`, `/rescan`, `/reset`, `/readonly`, `/help`, `/quit`; `Ctrl+C` interrompe o agente; `Ctrl+D` sai.
+* **`session.py`**: `Session(config_dir, project_path)` — workspace `configs/<slug>/`, `session.jsonl` (histórico `{role, content}`), `workspace/`, `asts/`; 1 sessão ativa por projeto (`reset()` limpa).
+* **`scan_artifacts.py`**: `generate_artifacts(session, premises)` → `{tree, num_files, ast_files, dependencies}`; persiste `tree.txt`, `dependencies.json`, `asts/<relpath>`; `artifacts_summary(result)` enxuto para o prompt.
+* **`permissions.py`**: `PermissionGate(mode)` — `read_file/list_dir` sempre; `run_shell/run_python/write_file` conforme `ask` (y/n/a com "sempre na sessão"), `readonly` (nega), `auto` (aceita).
+* **`tools.py`**: `apply_step(step, cwd, python, timeout)` → `ToolResult{ok, output}`; `write_file` delega ao `ChangeApplier` (aplicação imediata, caminho-resolvido como `expected`).
+* **`agent.py`**: `AgentRun.run(user_prompt, ask_user, ask_permission)` — loop de `steps` até `done`; resultados de ferramentas viram mensagens de contexto; persistidos no `session.jsonl` (retomável).
+
+### 8.7. Entry point (`cli/entry.py`, `pyproject.toml`)
+```python
+def main(argv=None):  # console script `capoeira`
+    # se arg0 for subcomando conhecido ou opção ('-'), delega ao Click (cli.main:cli)
+    # senão trata arg0 como PATH do projeto e chama run_tui (flag parsing limitado)
+```
+Instalação: `pip install -e .` cria os executáveis `capoeira`/`capoeira-code`.
+
 ---
 
 ## 9. Registro de Alterações
@@ -300,3 +368,4 @@ ApplyResult: ok, message, error, payload(CapoeiraResponse|None), staged(dict|Non
 | `1.1.0` | 20/08/2026 | **Iteração 1 (CLI)**: reducers PHP/JS, server WS, applier atômico; 30 testes. |
 | `2.0.0` | 07/09/2026 | **Iteração 3 (reajuste)**: removida comunicação via extensão/navegador; LLM via backend compatível com Ollama (`POST /api/chat`, stdlib); comandos `refactor/generate/explain/deps`; spec 53 testes. |
 | `3.0.0` | 08/09/2026 | **Iteração 4 (motor de instrução)**: 86 testes. Novo comando **`run`** declarativo (estilo OpenCode) — instrução livre com specs/skills/prompts em arquivos, o LLM decide as ações. **Premissas por projeto** (`projects/*.yaml` em `CAPOEIRA_CONFIG_DIR`/`%APPDATA%\CapoeiraCode`/`~/.capoeira`) com stack/banco/frontend/rag. **Scanner** de dependências e tabelas (`cli/project/scanner.py`). ****`ask`** e `--rag`** integrando o `local-rag-system` via subprocess. **Applier multi-arquivo** (formato `files:[...]` + staging all-or-nothing, extensão da RNF-04 ao lote; formato único mantido por compat). `deps --project` classifica módulo e lista tabelas. Requires +`PyYAML`. |
+| `4.0.0` | 08/09/2026 | **Iteração 5 (modo agente/TUI)**: 122 testes. `capoeira [PATH]` abre a **TUI interativa** (prompt_toolkit + rich) estilo OpenCode representando todo o fluxo da visão (item 5): workspace de sessão por projeto em `configs/<slug>/` (`session.jsonl` retomável, 1 sessão ativa + `/reset`); artefatos de scan `tree.txt`/`dependencies.json`/`asts/`; **loop de agente** com contrato de ferramentas (§5.1) — `read_file/list_dir/run_shell/run_python/write_file/ask_user/done`, aplicação `write_file` via applier, política de permissão (`readonly`/`ask`/`auto`, leitura automática, `--readonly`); `chat_messages` no `LLMClient`; entry point `capoeira` (pyproject) + subcomando `tui`; `python -m cli [PATH]` também funciona via `cli/entry.py`. Requires +`prompt_toolkit`/`rich`. |

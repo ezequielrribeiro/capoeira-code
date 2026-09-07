@@ -11,6 +11,11 @@ O CapoeiraCode também funciona como um **motor de instrução declarativo** (es
 você escreve `specs`, `skills` e `prompts` em arquivos e o LLM decide as ações (inclusive
 lote multi-arquivo), aplicadas atomicamente — sem subcomandos fixos por fluxo.
 
+E, na v4.0.0, entra o **modo agente interativo (TUI)**: `capoeira [PATH]` inicia na raiz do
+projeto, cria um workspace de sessão com artefatos de scan e roda um **loop de
+desenvolvimento** em que o LLM pode pedir leituras de arquivos, comandos shell/python e
+aplicações — como no chat do Gemini/Copilot, mas local e atômico.
+
 A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoeira-code-spec.md).
 
 ## Status do projeto
@@ -19,9 +24,10 @@ A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoei
 | --- | --- |
 | CLI Python (reducers PHP/JS/Python, applier multi-arquivo, cliente Ollama) | ✅ Implementado e testado |
 | Motor de instrução (`run`), `ask` (RAG), `deps --project` | ✅ Implementados e testados |
+| **Modo agente/TUI** (`capoeira [PATH]`), sessão, scan e ferramentas | ✅ Implementados e testados |
 | Premissas por projeto (`projects/*.yaml`) + scanner de dependências | ✅ Implementados |
 | Reducers HTML/CSS/SQL | ⏳ Futuro |
-| Sessão persistente/`--json`/autodetecção de projeto | ⏳ Futuro (Fase 3) |
+| Sessão múltipla por projeto, `--json`, streaming (`stream:true`) | ⏳ Futuro |
 
 ## Requisitos
 
@@ -37,7 +43,38 @@ A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoei
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+# opcional (recomendado): cria os executáveis `capoeira` / `capoeira-code`
+.\.venv\Scripts\python.exe -m pip install -e .
 ```
+
+## Uso interativo (TUI) — o fluxo "agente"
+
+```powershell
+# sem argumentos usa o diretório atual; com PATH usa a raiz do projeto
+capoeira "C:\sistemas\garagens"
+# ou, sem instalar o entry point:
+.\.venv\Scripts\python.exe -m cli tui "C:\sistemas\garagens"
+```
+
+Ao iniciar, o CapoeiraCode:
+1. cria o workspace de sessão em `<config>/configs/garagens/` (`tree.txt`,
+   `dependencies.json`, `asts/`, `session.jsonl`);
+2. carrega premissas (`projects/<slug>.yaml`) e specs/skills/prompts do config;
+3. mostra o prompt `capoeira> `. Digite a instrução e pressione `Enter`.
+
+O LLM responde com **passos de ferramentas**: `read_file`, `list_dir`, `run_shell`,
+`run_python`, `write_file`, `ask_user`, `done`. Leituras são automáticas; execução e
+escrita pedem aprovação na TUI (`y`/`n`/`a` = sempre na sessão). Use `--readonly` para
+bloquear execução/escrita. O histórico fica no `session.jsonl` (retoma na próxima execução);
+`Ctrl+C` interrompe o turno; `/reset` limpa a sessão.
+
+Comandos dentro da TUI: `/model M`, `/base-url URL`, `/premises`, `/rescan`, `/reset`,
+`/readonly`, `/help`, `/quit`.
+
+## Uso não-interativo
+
+Sempre a partir da raiz do repositório. Opções comuns: `--base-url`
+(padrão `http://127.0.0.1:8765`), `--model` (padrão `gemini-pro`) e `--timeout`.
 
 ## Configuração por projeto (premissas)
 
@@ -56,12 +93,7 @@ Um `projects/<nome>.yaml` descreve stack, estrutura de pastas, convenções, **b
 (schema/dump SQL) e onde roda o `local-rag-system`. Modelo em
 [`examples/capoeira-config.template`](examples/capoeira-config.template).
 
-## Uso
-
-Sempre a partir da raiz do repositório. Opções comuns: `--base-url`
-(padrão `http://127.0.0.1:8765`), `--model` (padrão `gemini-pro`) e `--timeout`.
-
-### `run` — motor de instrução (o coração)
+### `run` — motor de instrução (one-shot)
 
 Você descreve a tarefa e o LLM decide **quais arquivos** criar/editar e com que ação
 (`create_file` / `replace_symbol` / `patch_diff`), em lote multi-arquivo se preciso —
@@ -127,13 +159,21 @@ serviços externos.
 
 ```text
 cli/
-├── main.py              # Click: run (motor) | ask | refactor | generate | explain | deps
+├── entry.py             # `capoeira [PATH]` → TUI; subcomandos → Click
+├── main.py              # Click: tui | run | ask | refactor | generate | explain | deps
 ├── llm_client.py        # Cliente HTTP /api/chat compatível com Ollama (urllib, stdlib)
-├── prompts.py           # Builders de prompt; contrato multi-arquivo do motor run
+├── prompts.py           # Builders de prompt; contrato multi-arquivo e steps (agente)
 ├── applier.py           # Aplicador atômico multi-arquivo (create/replace/patch) em batch
 ├── instruction/         # Loader de specs/skills/prompts do diretório de config
 ├── project/             # Premissas por projeto (yaml) + scanner de dependências/banco
 ├── rag_client.py        # Integração com local-rag-system (subprocess)
+├── tui/                 # Modo agente interativo (prompt_toolkit + rich)
+│   ├── app.py           # TUI, /comandos, ciclo prompt ↔ agente
+│   ├── session.py       # workspace configs/<slug>/ + session.jsonl (retomável)
+│   ├── scan_artifacts.py# tree.txt, dependencies.json, asts/
+│   ├── permissions.py   # política (leitura auto; ask/readonly/auto)
+│   ├── tools.py         # executores read/list/run_shell/run_python/write_file
+│   └── agent.py         # loop de steps até done/max_turns
 └── reducers/            # Tree-Sitter PHP/JS/Python: esqueleto, deps, find_symbol_range
 ```
 
@@ -141,7 +181,10 @@ cli/
 
 - Placeholder de omissão: `// ... [Omitted by CapoeiraCode] ...`
 - Backend LLM: `POST {base_url}/api/chat` (JSON Ollama `{model, stream:false, messages}`)
-- Schema de resposta: ação única `{file_path, action, code_content, ...}` **ou** lote
+- Schema de resposta (one-shot): ação única `{file_path, action, code_content, ...}` **ou** lote
   `{"files": [...]}` (multi-arquivo); `action ∈ replace_symbol|create_file|patch_diff`
+- **Agente (TUI)**: resposta `{"steps":[{tool,...}]}` (§5.1 da spec); leitura automática,
+  execução/escrita sob política de permissão
 - RNF-04: falha ⇒ nada é escrito; multi-arquivo é all-or-nothing
 - Diretório de config: `CAPOEIRA_CONFIG_DIR` → `%APPDATA%\CapoeiraCode` → `~/.capoeira`
+- Sessão: `configs/<slug>/` com `session.jsonl` (1 sessão ativa por projeto + `/reset`)
