@@ -42,8 +42,12 @@ skills:           # arquivos em <config>/skills/
   - "criar-tela"
   - "corrigir-bug"
   - "otimizar"
+  - "criar-sistema"
 prompts:          # arquivos em <config>/prompts/ (fluxos pré-escritos)
   - "new-screen"
   - "bugfix"
   - "optimize"
   - "frontend"
+  - "bootstrap"
+blueprints:       # arquivos em <config>/blueprints/ (exemplos de estrutura)
+  - "sistema-web"

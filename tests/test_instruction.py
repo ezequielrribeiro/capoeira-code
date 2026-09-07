@@ -12,10 +12,12 @@ def _make_config(tmp_path: Path) -> Path:
     (tmp_path / "specs").mkdir()
     (tmp_path / "skills").mkdir()
     (tmp_path / "prompts").mkdir()
+    (tmp_path / "blueprints").mkdir()
     (tmp_path / "specs" / "01-padroes-telas.md").write_text("Toda tela usa layout.php", encoding="utf-8")
     (tmp_path / "specs" / "02-orm.md").write_text("ORM não usado", encoding="utf-8")
     (tmp_path / "skills" / "criar-tela.md").write_text("Procedimento criar-tela", encoding="utf-8")
     (tmp_path / "prompts" / "new-screen.md").write_text("Crie uma nova tela seguindo os padrões.", encoding="utf-8")
+    (tmp_path / "blueprints" / "sistema-web.md").write_text("Estrutura exemplo de sistema web", encoding="utf-8")
     return tmp_path
 
 
@@ -35,6 +37,8 @@ def test_load_sem_selecao_carrega_tudo(tmp_path):
     assert set(instr.specs) == {"01-padroes-telas", "02-orm"}
     assert set(instr.skills) == {"criar-tela"}
     assert "new-screen" in instr.prompts
+    assert "sistema-web" in instr.blueprints
+    assert "Estrutura exemplo" in instr.blueprints_combined
 
 
 def test_get_prompt_normaliza_maiusculas_e_sufixo(tmp_path):

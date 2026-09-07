@@ -57,6 +57,7 @@ class Premises(BaseModel):
     specs: list[str] | None = None
     skills: list[str] | None = None
     prompts: list[str] | None = None
+    blueprints: list[str] | None = None
 
     def validate_banco(self) -> str:
         """Retorna '' se banco ok, ou mensagem de orientação se algo faltar."""

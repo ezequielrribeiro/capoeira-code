@@ -177,13 +177,16 @@ def build_agent_system_prompt(
     specs: str = "",
     skills: str = "",
     artifacts: str = "",
+    blueprints: str = "",
 ) -> str:
-    """System prompt do agente (TUI): perfil + specs + skills + artefatos + contrato."""
+    """System prompt do agente (TUI): perfil + specs + skills + blueprints + artefatos + contrato."""
     sections = [f"## PERFIL DO PROJETO\n{profile.strip() or '(sem projeto configurado)'}"]
     if specs:
         sections.append(f"## ESPECIFICAÇÕES / PADRÕES DO SISTEMA\n{specs}")
     if skills:
         sections.append(f"## PROCEDIMENTOS (SKILLS)\n{skills}")
+    if blueprints:
+        sections.append(f"## BLUEPRINTS / EXEMPLOS DE ESTRUTURA\n{blueprints}")
     if artifacts:
         sections.append(f"## ARTEFATOS DO PROJETO (scan local)\n{artifacts}")
     sections.append(f"## CONTRATO DE RESPOSTA (ferramentas)\n{TOOLS_CONTRACT}")

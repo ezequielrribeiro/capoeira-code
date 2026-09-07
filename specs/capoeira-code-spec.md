@@ -1,8 +1,8 @@
 # 📜 Software Specification & Implementation Architecture: CapoeiraCode
 
 **Projeto:** CapoeiraCode  
-**Versão:** `4.0.0`  
-**Status:** `Approved — Iteração 5 (modo agente interativo/TUI com ferramentas) implementada e testada`  
+**Versão:** `4.1.0`  
+**Status:** `Approved — Iteração 6 (bootstrap "do zero" + streaming + blueprints) implementada e testada`  
 **Data:** 8 de Setembro de 2026  
 
 ---
@@ -27,6 +27,12 @@ textual (prompt_toolkit + rich) que cria um **workspace de sessão** por projeto
 que o LLM responde com **passos de ferramentas** (`read_file`, `list_dir`, `run_shell`,
 `run_python`, `write_file`, `ask_user`, `done`) — leituras automáticas; escrita/execução
 seguem política de permissão — até a conclusão da tarefa.
+
+Na v4.1.0 o fluxo vira de **criação do zero**: detecção de projeto vazio, atalho
+**`/bootstrap`** (pergunta stack/nome/banco e gera a base + `.sql`), **streaming**
+(`stream:true` com exibição incremental na TUI), diretório **`blueprints/`** no config
+(exemplos de estrutura definidos pelo usuário) e melhorias de UX (autocompletar de
+`/comandos`, `/max-turns`).
 
 ### 1.2. Problema de Negócio
 Sistemas legados possuem bases extensas, acopladas e com pouca documentação. Rotinas como
@@ -81,6 +87,8 @@ applier multi-arquivo implementados e testados; não há componente de navegador
 Na v4.0.0, `capoeira [PATH]` inicia a **TUI** que: (a) cria `configs/<slug>/` no diretório
 de config com workspace de sessão; (b) gera artefatos de scan (`tree.txt`,
 `dependencies.json`, `asts/`); (c) roda o agente com ferramentas (item 5 da visão).
+Na v4.1.0, projeto vazio => fluxo de **bootstrap** (`/bootstrap`), resposta do agente
+exibida em **streaming**, e `blueprints/` do config entra no contexto do prompt.
 
 ---
 
@@ -149,8 +157,11 @@ class BaseLanguageReducer(ABC):
 ```json
 { "model": "gemini-pro", "message": { "role": "assistant", "content": "{ ... }" }, "done": true }
 ```
-### 4.3. Tempo de espera
+### 4.3. Tempo de espera e streaming
 `--timeout` (padrão 180 s); rede timeout ou back-end exceder o prazo levantam `LLMRequestError` → exit 1.
+No modo agente, `chat_messages(..., stream=True, on_chunk)` usa `stream:true` (NDJSON linha a
+linha do Ollama) para exibir a resposta em tempo real; o texto completo é acumulado antes do
+parse/execução das ferramentas.
 
 ---
 
@@ -369,3 +380,4 @@ Instalação: `pip install -e .` cria os executáveis `capoeira`/`capoeira-code`
 | `2.0.0` | 07/09/2026 | **Iteração 3 (reajuste)**: removida comunicação via extensão/navegador; LLM via backend compatível com Ollama (`POST /api/chat`, stdlib); comandos `refactor/generate/explain/deps`; spec 53 testes. |
 | `3.0.0` | 08/09/2026 | **Iteração 4 (motor de instrução)**: 86 testes. Novo comando **`run`** declarativo (estilo OpenCode) — instrução livre com specs/skills/prompts em arquivos, o LLM decide as ações. **Premissas por projeto** (`projects/*.yaml` em `CAPOEIRA_CONFIG_DIR`/`%APPDATA%\CapoeiraCode`/`~/.capoeira`) com stack/banco/frontend/rag. **Scanner** de dependências e tabelas (`cli/project/scanner.py`). ****`ask`** e `--rag`** integrando o `local-rag-system` via subprocess. **Applier multi-arquivo** (formato `files:[...]` + staging all-or-nothing, extensão da RNF-04 ao lote; formato único mantido por compat). `deps --project` classifica módulo e lista tabelas. Requires +`PyYAML`. |
 | `4.0.0` | 08/09/2026 | **Iteração 5 (modo agente/TUI)**: 122 testes. `capoeira [PATH]` abre a **TUI interativa** (prompt_toolkit + rich) estilo OpenCode representando todo o fluxo da visão (item 5): workspace de sessão por projeto em `configs/<slug>/` (`session.jsonl` retomável, 1 sessão ativa + `/reset`); artefatos de scan `tree.txt`/`dependencies.json`/`asts/`; **loop de agente** com contrato de ferramentas (§5.1) — `read_file/list_dir/run_shell/run_python/write_file/ask_user/done`, aplicação `write_file` via applier, política de permissão (`readonly`/`ask`/`auto`, leitura automática, `--readonly`); `chat_messages` no `LLMClient`; entry point `capoeira` (pyproject) + subcomando `tui`; `python -m cli [PATH]` também funciona via `cli/entry.py`. Requires +`prompt_toolkit`/`rich`. |
+| `4.1.0` | 08/09/2026 | **Iteração 6 (criar do zero)**: 131 testes. **Bootstrap** na TUI — `is_empty_project` (sem código e sem manifest), comando `/bootstrap` (template `prompts/bootstrap.md` ou padrão embutido) que pergunta stack/nome/banco via `ask_user`, gera a base e `database/schema.sql` + `migrations/*.sql` (execução fica com o usuário). **Streaming** no `LLMClient.chat_messages(stream=True, on_chunk)` (NDJSON) com exibição incremental no agente. **`blueprints/`** no config (exemplos de estrutura definidos pelo usuário, seleção por `blueprints:` nas premissas) injetado no prompt do agente. UX: autocompletar de `/comandos`, `/max-turns`. Ratifica que a stack é definida pelo usuário (blueprints/.md/prompt), nunca hardcoded. |

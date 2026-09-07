@@ -26,12 +26,19 @@ def _read_dir(dir_path: Path, selected: list[str] | None) -> dict[str, str]:
 
 
 class InstructionSet:
-    """Conjunto carregado do diretório de config: specs, skills e prompts."""
+    """Conjunto carregado do diretório de config: specs, skills, prompts e blueprints."""
 
-    def __init__(self, specs: dict[str, str], skills: dict[str, str], prompts: dict[str, str]):
+    def __init__(
+        self,
+        specs: dict[str, str],
+        skills: dict[str, str],
+        prompts: dict[str, str],
+        blueprints: dict[str, str] | None = None,
+    ):
         self.specs = specs
         self.skills = skills
         self.prompts = prompts
+        self.blueprints = blueprints or {}
 
     @property
     def specs_combined(self) -> str:
@@ -40,6 +47,10 @@ class InstructionSet:
     @property
     def skills_combined(self) -> str:
         return "\n\n---\n\n".join(self.skills.values()).strip()
+
+    @property
+    def blueprints_combined(self) -> str:
+        return "\n\n---\n\n".join(self.blueprints.values()).strip()
 
     def get_prompt(self, name: str | None) -> str:
         if not name:
@@ -51,11 +62,12 @@ class InstructionSet:
 
 
 def load_instruction_set(config_dir: Path, premises: Premises) -> InstructionSet:
-    """Carrega specs/skills/prompts do config_dir usando as seleções do yaml."""
+    """Carrega specs/skills/prompts/blueprints do config_dir usando as seleções do yaml."""
     return InstructionSet(
         specs=_read_dir(config_dir / "specs", premises.specs),
         skills=_read_dir(config_dir / "skills", premises.skills),
         prompts=_read_dir(config_dir / "prompts", premises.prompts),
+        blueprints=_read_dir(config_dir / "blueprints", premises.blueprints),
     )
 
 

@@ -28,6 +28,7 @@ class AgentOptions:
     timeout: float = 120.0
     max_turns: int = 20
     mode: str = "ask"
+    on_chunk=None
 
 
 class AgentRun:
@@ -46,16 +47,26 @@ class AgentRun:
     def _system_prompt(self) -> str:
         opts = self.options
         profile = render_project_profile(opts.premises)
-        specs = opts.instruction_set.specs_combined if opts.instruction_set else ""
-        skills = opts.instruction_set.skills_combined if opts.instruction_set else ""
-        return build_agent_system_prompt(profile, specs=specs, skills=skills, artifacts=opts.artifacts_summary)
+        instr = opts.instruction_set
+        specs = instr.specs_combined if instr else ""
+        skills = instr.skills_combined if instr else ""
+        blueprints = instr.blueprints_combined if instr else ""
+        return build_agent_system_prompt(
+            profile,
+            specs=specs,
+            skills=skills,
+            artifacts=opts.artifacts_summary,
+            blueprints=blueprints,
+        )
 
     def _build_prompt_messages(self) -> list[dict]:
         history = self.messages[-MAX_CONTEXT_MESSAGES:]
         return [{"role": "system", "content": self._system_prompt()}] + history
 
     def _chat_once(self) -> str:
-        return self.client.chat_messages(self._build_prompt_messages())
+        msgs = self._build_prompt_messages()
+        streaming = self.options.on_chunk is not None
+        return self.client.chat_messages(msgs, stream=streaming, on_chunk=self.options.on_chunk)
 
     # ------------------------------------------------------------------
     # Registro

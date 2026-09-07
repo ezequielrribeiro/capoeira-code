@@ -3,6 +3,7 @@
 import os
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
 
@@ -10,7 +11,8 @@ from ..llm_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_TIMEOUT, LLMCl
 from ..instruction.loader import load_instruction_set
 from ..project.premises import EMPTY_PREMISES, load_premises, resolve_config_dir
 from .agent import AgentOptions, AgentRun
-from .scan_artifacts import artifacts_summary, generate_artifacts
+from .bootstrap import bootstrap_instruction
+from .scan_artifacts import artifacts_summary, generate_artifacts, is_empty_project
 from .session import Session, slugify
 
 _HELP = """/help            - esta ajuda
@@ -19,9 +21,16 @@ _HELP = """/help            - esta ajuda
 /premises       - recarrega premissas e specs/skills/prompts do config
 /rescan         - regenera os artefatos de scan do projeto
 /reset          - apaga a sessão/histórico e rescan
+/bootstrap       - cria um sistema do zero (pergunta stack/banco; gera .sql)
+/max-turns N    - limite de turnos do agente (padrão 20)
 /readonly       - alterna modo somente-leitura (bloqueia execução/escrita)
 /quit           - sai da TUI
 """
+
+_COMMANDS = [
+    "/help", "/model", "/base-url", "/premises", "/rescan", "/reset",
+    "/bootstrap", "/max-turns", "/readonly", "/quit", "/exit",
+]
 
 
 def run_tui(
@@ -64,9 +73,18 @@ def run_tui(
     console.print(
         f"Backend: {client.base_url} | Modelo: {client.model} | Projeto: {session.project_path}"
     )
+    if is_empty_project(artifacts, session.project_path):
+        console.print(
+            "[yellow]Diretório parece vazio (projeto do zero). "
+            "Digite /bootstrap ou descreva o sistema a criar.[/yellow]"
+        )
     console.print("Digite um prompt e pressione Enter. /help para comandos.")
 
-    prompt_session = PromptSession(history=InMemoryHistory())
+    completer = WordCompleter(_COMMANDS, ignore_case=True)
+    prompt_session = PromptSession(history=InMemoryHistory(), completer=completer)
+
+    def on_chunk(part: str) -> None:
+        console.print(part, end="", highlight=False)
 
     def ask_user(question: str) -> str:
         return prompt_session.prompt(f"[pergunta] {question}\n> ")
@@ -76,6 +94,8 @@ def run_tui(
             f"[permissão] Executar '{description}'? (y=sim, n=não, a=sempre na sessão) "
         )
         return choice.strip().lower()[:1] or "n"
+
+    options.on_chunk = on_chunk
 
     while True:
         try:
@@ -89,6 +109,22 @@ def run_tui(
             continue
 
         if text.startswith("/"):
+            if text.lower() in ("/bootstrap", "/bootstrap "):
+                console.print("[dim]bootstrap... (Ctrl+C interrompe)[/dim]")
+                try:
+                    result = agent.run(
+                        bootstrap_instruction(instr_set),
+                        ask_user=ask_user,
+                        ask_permission=ask_permission,
+                    )
+                except KeyboardInterrupt:
+                    console.print()
+                    console.print("[yellow]\nBootstrap interrompido.[/yellow]")
+                    continue
+                console.print()
+                if result.get("done") and result.get("message"):
+                    console.print(f"[green]{result['message']}[/green]")
+                continue
             if not _handle_slash(
                 text, console, session, premises, instr_set, artifacts, client, options, agent,
             ):
@@ -99,8 +135,10 @@ def run_tui(
         try:
             result = agent.run(text, ask_user=ask_user, ask_permission=ask_permission)
         except KeyboardInterrupt:
+            console.print()
             console.print("[yellow]\nInterrompido pelo usuário. O contexto segue na próxima linha.[/yellow]")
             continue
+        console.print()
         if result.get("done"):
             message = result.get("message") or ""
             if message:
@@ -169,6 +207,14 @@ def _handle_slash(
         options.artifacts_summary = artifacts_summary(artifacts)
         agent.messages = session.load_messages()
         console.print("Sessão reiniciada (histórico apagado) e scan refeito.")
+    elif cmd == "/bootstrap":
+        console.print("[yellow]Use /bootstrap na linha de comando para iniciar.[/yellow]")
+    elif cmd == "/max-turns" and arg:
+        try:
+            options.max_turns = max(1, int(arg))
+            console.print(f"Máximo de turnos: {options.max_turns}")
+        except ValueError:
+            console.print("[red]Valor inválido para /max-turns.[/red]")
     elif cmd == "/readonly":
         options.mode = "readonly" if options.mode != "readonly" else "ask"
         agent.gate.mode = options.mode

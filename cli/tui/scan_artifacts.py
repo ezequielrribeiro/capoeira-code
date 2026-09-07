@@ -11,6 +11,7 @@ from .session import Session
 
 _IGNORED_DIRS = {".git", ".venv", "__pycache__", "node_modules", "vendor", ".idea", ".vscode"}
 _TREE_LIMIT = 300
+_MANIFESTS = {"composer.json", "package.json", "pyproject.toml", "requirements.txt"}
 
 
 def _tree_lines(root: Path, prefix: str = "") -> list[str]:
@@ -99,3 +100,14 @@ def artifacts_summary(result: dict, max_lines: int = 80) -> str:
     ]
     summary.extend(f"  {line}" for line in tree)
     return "\n".join(summary)
+
+
+def is_empty_project(result: dict, project_path: str) -> bool:
+    """Projeto "do zero": sem código indexado e sem manifest de stack reconhecido."""
+    if result.get("num_files"):
+        return False
+    root = Path(project_path)
+    if not root.is_dir():
+        return True
+    names = {p.name.lower() for p in root.iterdir() if p.is_file()}
+    return not (names & _MANIFESTS)

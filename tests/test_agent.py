@@ -10,7 +10,7 @@ class FakeClient:
     def __init__(self, responses):
         self.responses = list(responses)
 
-    def chat_messages(self, messages):
+    def chat_messages(self, messages, **kwargs):
         return self.responses.pop(0)
 
 

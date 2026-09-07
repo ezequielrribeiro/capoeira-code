@@ -2,8 +2,8 @@
 
 ## Estado do repositório
 
-- **Iteração 5 concluída (v4.0.0)**: o CLI Python é um **motor de instrução declarativo** (estilo OpenCode) + **modo agente interativo (TUI)** com ferramentas. Fala com LLM via **backend compatível com a API do Ollama** (`POST /api/chat`, stdlib `urllib`). **Não existe comunicação via extensão/navegador**; esse papel é do [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host).
-- Fonte da verdade: `specs/capoeira-code-spec.md` (pt-BR, v4.0.0; §9 lista o histórico). Contratos de protocolo/schema vêm de lá; detalhes de implementação, o código manda.
+- **Iteração 6 concluída (v4.1.0)**: o CLI Python é um **motor de instrução declarativo** (estilo OpenCode) + **modo agente interativo (TUI)** com ferramentas, incluindo **criar sistema do zero** (bootstrap), **streaming** (`stream:true` NDJSON) e diretório **`blueprints/`** no config. Fala com LLM via **backend compatível com a API do Ollama** (`POST /api/chat`, stdlib `urllib`). **Não existe comunicação via extensão/navegador**; esse papel é do [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host).
+- Fonte da verdade: `specs/capoeira-code-spec.md` (pt-BR, v4.1.0; §9 lista o histórico). Contratos de protocolo/schema vêm de lá; detalhes de implementação, o código manda.
 - Documentação e strings visíveis ao usuário são em **pt-BR**.
 
 ## Comandos (Windows, a partir da raiz)
@@ -38,12 +38,14 @@ python -m venv .venv
 5. **`apply_payload(raw, expected_file_path=None)`**: com `generate`, o `file_path` retornado deve casar o alvo, senão falha sem escrever.
 6. **Motor `run`** (`cli/instruction/loader.py` + `cli/project/premises.py` + `cli/rag_client.py`): premissas em `projects/<nome>.yaml` no dir de config; specs/skills/prompts em `.md`; listas vazias em `specs/skills/prompts` significam "nenhum", omissão significa "todos".
 7. **TUI/agente** (`cli/tui/`): o LLM responde `{"steps":[...]}` (contrato §5.1); leitura auto, execução/escrita sob `PermissionGate` (ask/readonly/auto); workspace de sessão em `configs/<slug>/` + `session.jsonl`; entry `capoeira [PATH]` via `cli/entry.py` (PATH → TUI; subcomando/opção → Click).
+8. **Bootstrap/criar do zero**: `is_empty_project` (sem código indexado e sem `composer.json`/`package.json`/`pyproject.toml`/`requirements.txt`) → `/bootstrap` usa `prompts/bootstrap.md` (termo padrão embutido em `cli/tui/bootstrap.py`) e gera `.sql` para o usuário executar; stack nunca hardcoded — vem de `blueprints/`/`specs/`/`skills/`/prompt.
+9. **Streaming**: `LLMClient.chat_messages(stream=True, on_chunk)` lê NDJSON linha a linha e acumula; no agente, `AgentOptions.on_chunk != None` ativa o stream (testes com `stream=False`).
 
 ## Contratos que não podem derivar
 
 - Placeholder exato: `// ... [Omitted by CapoeiraCode] ...` (`OMISSION_PLACEHOLDER`, PHP/JS) e `# ... [Omitted by CapoeiraCode] ...` (`PYTHON_OMISSION_PLACEHOLDER`, Python) — em `cli/reducers/base.py`.
 - Backend LLM: `POST {base_url}/api/chat` JSON Ollama `{model, stream:false, messages:[system, user]}`; default `http://127.0.0.1:8765` (CapoeiraHost), `--model gemini-pro`. Sem chave de API.
-- Diretório de config: `CAPOEIRA_CONFIG_DIR` → `%APPDATA%\CapoeiraCode` → `~/.capoeira`.
+- Diretório de config: `CAPOEIRA_CONFIG_DIR` → `%APPDATA%\CapoeiraCode` → `~/.capoeira`; subpastas `projects/`, `specs/`, `skills/`, `prompts/`, `blueprints/`.
 - Schema LLM (§5): ação única `{file_path, action ∈ replace_symbol|create_file|patch_diff, code_content}` **ou** lote `{"files": [...]}`; no agente, `{"steps":[...]}` com `tool ∈ read_file|list_dir|run_shell|run_python|write_file|ask_user|done`.
 - RNF-04: falha ⇒ nada é escrito (atômico, inclusive no lote) + autocorreção até `--max-retries` (padrão 3).
 - RNF-01: skeleton < 200 ms para 5.000 linhas (medido ~97 ms).

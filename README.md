@@ -15,6 +15,8 @@ E, na v4.0.0, entra o **modo agente interativo (TUI)**: `capoeira [PATH]` inicia
 projeto, cria um workspace de sessão com artefatos de scan e roda um **loop de
 desenvolvimento** em que o LLM pode pedir leituras de arquivos, comandos shell/python e
 aplicações — como no chat do Gemini/Copilot, mas local e atômico.
+Na v4.1.0 dá para **criar um sistema do zero**: em pasta vazia a TUI sugere `/bootstrap`,
+que pergunta a stack e gera a base (+ `.sql`), com streaming da resposta.
 
 A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoeira-code-spec.md).
 
@@ -25,6 +27,7 @@ A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoei
 | CLI Python (reducers PHP/JS/Python, applier multi-arquivo, cliente Ollama) | ✅ Implementado e testado |
 | Motor de instrução (`run`), `ask` (RAG), `deps --project` | ✅ Implementados e testados |
 | **Modo agente/TUI** (`capoeira [PATH]`), sessão, scan e ferramentas | ✅ Implementados e testados |
+| **Criar do zero**: bootstrap, streaming e `blueprints/` | ✅ Implementados e testados |
 | Premissas por projeto (`projects/*.yaml`) + scanner de dependências | ✅ Implementados |
 | Reducers HTML/CSS/SQL | ⏳ Futuro |
 | Sessão múltipla por projeto, `--json`, streaming (`stream:true`) | ⏳ Futuro |
@@ -66,10 +69,15 @@ O LLM responde com **passos de ferramentas**: `read_file`, `list_dir`, `run_shel
 `run_python`, `write_file`, `ask_user`, `done`. Leituras são automáticas; execução e
 escrita pedem aprovação na TUI (`y`/`n`/`a` = sempre na sessão). Use `--readonly` para
 bloquear execução/escrita. O histórico fica no `session.jsonl` (retoma na próxima execução);
-`Ctrl+C` interrompe o turno; `/reset` limpa a sessão.
+`Ctrl+C` interrompe o turno; `/reset` limpa a sessão. Respostas chegam em **streaming**.
 
-Comandos dentro da TUI: `/model M`, `/base-url URL`, `/premises`, `/rescan`, `/reset`,
-`/readonly`, `/help`, `/quit`.
+Em um diretório vazio (ou sem stack reconhecido), digite **`/bootstrap`**: o agente pergunta
+a stack, nome e banco, cria a estrutura base e gera `database/schema.sql` +
+`migrations/*.sql` — **você executa os `.sql`** no banco desejado. Defina a stack/estrutura
+nos `.md` do config (`blueprints/`, `specs/`, `skills/`) ou no próprio prompt.
+
+Comandos dentro da TUI: `/help`, `/model M`, `/base-url URL`, `/premises`, `/rescan`,
+`/reset`, `/bootstrap`, `/max-turns N`, `/readonly`, `/quit`.
 
 ## Uso não-interativo
 
@@ -86,7 +94,8 @@ CapoeiraCode/
 ├── projects/*.yaml      # premissas por sistema legado (veja examples/)
 ├── specs/*.md           # regras/padrões do sistema (declarativo)
 ├── skills/*.md          # procedimentos que o motor pode usar
-└── prompts/*.md         # fluxos pré-escritos (new-screen, bugfix, optimize, ...)
+├── prompts/*.md         # fluxos pré-escritos (new-screen, bugfix, bootstrap, ...)
+└── blueprints/*.md      # exemplos de estrutura/stack (usados no bootstrap/agente)
 ```
 
 Um `projects/<nome>.yaml` descreve stack, estrutura de pastas, convenções, **banco**
@@ -168,12 +177,13 @@ cli/
 ├── project/             # Premissas por projeto (yaml) + scanner de dependências/banco
 ├── rag_client.py        # Integração com local-rag-system (subprocess)
 ├── tui/                 # Modo agente interativo (prompt_toolkit + rich)
-│   ├── app.py           # TUI, /comandos, ciclo prompt ↔ agente
+│   ├── app.py           # TUI, /comandos, streaming, auto-sugestão de bootstrap
 │   ├── session.py       # workspace configs/<slug>/ + session.jsonl (retomável)
-│   ├── scan_artifacts.py# tree.txt, dependencies.json, asts/
+│   ├── scan_artifacts.py# tree.txt, dependencies.json, asts/ (+ is_empty_project)
 │   ├── permissions.py   # política (leitura auto; ask/readonly/auto)
 │   ├── tools.py         # executores read/list/run_shell/run_python/write_file
-│   └── agent.py         # loop de steps até done/max_turns
+│   ├── agent.py         # loop de steps até done/max_turns (streaming)
+│   └── bootstrap.py     # instrução/funcões do criar-do-zero (/bootstrap)
 └── reducers/            # Tree-Sitter PHP/JS/Python: esqueleto, deps, find_symbol_range
 ```
 
@@ -184,7 +194,8 @@ cli/
 - Schema de resposta (one-shot): ação única `{file_path, action, code_content, ...}` **ou** lote
   `{"files": [...]}` (multi-arquivo); `action ∈ replace_symbol|create_file|patch_diff`
 - **Agente (TUI)**: resposta `{"steps":[{tool,...}]}` (§5.1 da spec); leitura automática,
-  execução/escrita sob política de permissão
+  execução/escrita sob política de permissão; resposta em streaming (`stream:true`)
 - RNF-04: falha ⇒ nada é escrito; multi-arquivo é all-or-nothing
 - Diretório de config: `CAPOEIRA_CONFIG_DIR` → `%APPDATA%\CapoeiraCode` → `~/.capoeira`
 - Sessão: `configs/<slug>/` com `session.jsonl` (1 sessão ativa por projeto + `/reset`)
+- Bootstrap/stack: definido pelo usuário via `blueprints/`-`specs/`-`skills/`-`prompts/` `.md` ou prompt (sem stack hardcoded); banco vira `.sql` para o usuário executar

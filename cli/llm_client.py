@@ -40,11 +40,20 @@ class LLMClient:
         }
         return self.chat_messages(body["messages"])
 
-    def chat_messages(self, messages: list[dict]) -> str:
-        """Envia uma conversa (roles system/user/assistant) e retorna a resposta."""
+    def chat_messages(
+        self,
+        messages: list[dict],
+        stream: bool = False,
+        on_chunk=None,
+    ) -> str:
+        """Envia uma conversa (roles system/user/assistant) e retorna a resposta.
+
+        Com `stream=True` (NDJSON do Ollama), lê as respostas incrementalmente,
+        acumula `message.content` e chama `on_chunk(texto)` para cada fragmento.
+        """
         body = {
             "model": self.model,
-            "stream": False,
+            "stream": bool(stream),
             "messages": messages,
         }
         request = urllib.request.Request(
@@ -55,7 +64,10 @@ class LLMClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as resp:
-                raw = resp.read().decode("utf8")
+                if not stream:
+                    raw = resp.read().decode("utf8")
+                else:
+                    return self._read_stream(resp, on_chunk)
         except urllib.error.HTTPError as e:
             raise LLMRequestError(self._http_error_message(e)) from e
         except urllib.error.URLError as e:
@@ -71,6 +83,25 @@ class LLMClient:
         if not content:
             raise LLMRequestError("O backend retornou uma resposta sem conteúdo.")
         return content
+
+    @staticmethod
+    def _read_stream(resp, on_chunk) -> str:
+        """Lê a resposta streaming (uma linha JSON NDJSON por chunk) e acumula."""
+        parts: list[str] = []
+        for raw_line in resp:
+            line = raw_line.decode("utf8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            content = ((data.get("message") or {}).get("content")) or ""
+            if content:
+                parts.append(content)
+                if on_chunk is not None:
+                    on_chunk(content)
+        return "".join(parts)
 
     @staticmethod
     def _http_error_message(error: urllib.error.HTTPError) -> str:
