@@ -1,10 +1,15 @@
 # CapoeiraCode
 
-Agente CLI para manutenção, refatoração, **compreensão** e **criação de artefatos** de
-**sistemas legados**. O CLI reduz o contexto do código via AST (Tree-Sitter) e conversa
-com um **backend compatível com a API do Ollama** — tanto o [Ollama](https://ollama.com)
-nativo quanto o gateway [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host) —
-via HTTP/JSON (`POST /api/chat`). Sem navegador, sem extensão, sem ponte WebSocket.
+Agente CLI para manutenção, refatoração, criação de telas/artefatos e **automação de
+rotina** em **sistemas legados** (foco inicial em PHP). O CLI reduz o contexto do código
+via AST (Tree-Sitter) e conversa com um **backend compatível com a API do Ollama** —
+tanto o [Ollama](https://ollama.com) nativo quanto o gateway
+[CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host) — via HTTP/JSON
+(`POST /api/chat`). Sem navegador, sem extensão, sem ponte WebSocket.
+
+O CapoeiraCode também funciona como um **motor de instrução declarativo** (estilo OpenCode):
+você escreve `specs`, `skills` e `prompts` em arquivos e o LLM decide as ações (inclusive
+lote multi-arquivo), aplicadas atomicamente — sem subcomandos fixos por fluxo.
 
 A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoeira-code-spec.md).
 
@@ -12,9 +17,11 @@ A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoei
 
 | Componente | Status |
 | --- | --- |
-| CLI Python (reducers PHP/JS/Python, applier atômico, cliente Ollama) | ✅ Implementado e testado |
-| Comandos `refactor`, `generate`, `explain`, `deps` | ✅ Implementados e testados |
-| Reducers HTML/CSS | ⏳ Futuro |
+| CLI Python (reducers PHP/JS/Python, applier multi-arquivo, cliente Ollama) | ✅ Implementado e testado |
+| Motor de instrução (`run`), `ask` (RAG), `deps --project` | ✅ Implementados e testados |
+| Premissas por projeto (`projects/*.yaml`) + scanner de dependências | ✅ Implementados |
+| Reducers HTML/CSS/SQL | ⏳ Futuro |
+| Sessão persistente/`--json`/autodetecção de projeto | ⏳ Futuro (Fase 3) |
 
 ## Requisitos
 
@@ -22,6 +29,8 @@ A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoei
 - Um backend compatível com Ollama rodando:
   - **CapoeiraHost** (padrão): `python -m server.main` em `http://127.0.0.1:8765` (subir também a extensão no navegador com uma aba logada do provedor), ou
   - **Ollama nativo**: `ollama serve` em `http://127.0.0.1:11434` com algum modelo (`ollama pull qwen2.5-coder`).
+- **Opcional** — [local-rag-system](https://github.com/ezequielrribeiro/local-rag-system)
+  para injetar contexto (docs/tickets) via `--rag`/`ask`.
 
 ## Setup
 
@@ -30,87 +39,109 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 ```
 
-> **Nota de dependência:** a spec §8.1 citava `tree-sitter-languages`, mas esse pacote
-> está abandonado e **não tem wheel para Python 3.13**. Usamos `tree-sitter` +
-> `tree-sitter-php` + `tree-sitter-javascript` (pacotes oficiais, mesma capacidade).
-> A comunicação com o LLM usa apenas a stdlib (`urllib`), sem dependências novas.
+## Configuração por projeto (premissas)
+
+Crie um diretório de config do CapoeiraCode (`CAPOEIRA_CONFIG_DIR`, ou
+`%APPDATA%\CapoeiraCode` no Windows, ou `~/.capoeira`) com a seguinte estrutura:
+
+```text
+CapoeiraCode/
+├── projects/*.yaml      # premissas por sistema legado (veja examples/)
+├── specs/*.md           # regras/padrões do sistema (declarativo)
+├── skills/*.md          # procedimentos que o motor pode usar
+└── prompts/*.md         # fluxos pré-escritos (new-screen, bugfix, optimize, ...)
+```
+
+Um `projects/<nome>.yaml` descreve stack, estrutura de pastas, convenções, **banco**
+(schema/dump SQL) e onde roda o `local-rag-system`. Modelo em
+[`examples/capoeira-config.template`](examples/capoeira-config.template).
 
 ## Uso
 
-Sempre a partir da raiz do repositório. Opções comuns a comandos que chamam o LLM:
-`--base-url` (padrão `http://127.0.0.1:8765`), `--model` (padrão `gemini-pro`) e `--timeout`.
+Sempre a partir da raiz do repositório. Opções comuns: `--base-url`
+(padrão `http://127.0.0.1:8765`), `--model` (padrão `gemini-pro`) e `--timeout`.
 
-### `refactor` — refatorar um símbolo de um arquivo legado
+### `run` — motor de instrução (o coração)
 
-```powershell
-.\.venv\Scripts\python.exe -m cli refactor `
-  --file caminho/para/legado.php `
-  --symbol nome_do_metodo `
-  --instruction "Extraia a lógica de desconto para um método privado" `
-  --model gemini-pro
-```
-
-Com Ollama nativo: `--base-url http://127.0.0.1:11434 --model qwen2.5-coder`.
-
-### `generate` — criar artefatos que auxiliam a codificação
-
-Testes, esqueleto de módulo, scaffolding, documentação — qualquer arquivo novo
-(ação `create_file`), ou reescrever um símbolo existente (use `--symbol`):
+Você descreve a tarefa e o LLM decide **quais arquivos** criar/editar e com que ação
+(`create_file` / `replace_symbol` / `patch_diff`), em lote multi-arquivo se preciso —
+aplicado atomicamente (RNF-04).
 
 ```powershell
-# Gerar testes para um arquivo
-.\.venv\Scripts\python.exe -m cli generate `
-  --file tests/test_legacy_calculator.php `
-  --instruction "Crie testes de unidade cobrindo os métodos da classe LegacyCalculator" `
-  --context src/legacy_calculator.php
+# Nova tela seguindo os prompts/skills do projeto
+.\.venv\Scripts\python.exe -m cli run `
+  "Crie a tela de cadastro de garagens com controller, view, CSS e migração SQL" `
+  --project exemplo-garagens `
+  --prompt new-screen `
+  --skill criar-tela
+
+# Correção de bug com contexto RAG (tickets/docs) e dry-run
+.\.venv\Scripts\python.exe -m cli run `
+  "Corrija o erro de listagem de vagas descrito" `
+  --project exemplo-garagens `
+  --prompt bugfix `
+  --file app/views/vagas.php `
+  --rag "ticket bloqueio no cadastro de vaga" `
+  --doc-type support `
+  --dry-run
 ```
 
-### `explain` — compreensão de código legado (somente leitura)
+`--dry-run` mostra o diff colorido e pede confirmação antes de gravar.
+
+### `ask` — consultar o `local-rag-system`
 
 ```powershell
-.\.venv\Scripts\python.exe -m cli explain --file src/legacy_calculator.php --symbol soma
+.\.venv\Scripts\python.exe -m cli ask "Como alterar a senha?" --project exemplo-garagens --doc-type user
 ```
 
-### `deps` — dependências do arquivo (sem LLM, rápido)
+### Comandos clássicos (mantidos)
 
 ```powershell
-.\.venv\Scripts\python.exe -m cli deps --file src/dashboard.js
+# Refatorar um símbolo específico
+.\.venv\Scripts\python.exe -m cli refactor --file app/models/Db.php --symbol conectar --instruction "..."
+
+# Gerar artefato (testes/esqueleto/docs)
+.\.venv\Scripts\python.exe -m cli generate --file tests/test_Garagens.php --instruction "Crie testes" --context app/models/Garagens.php
+
+# Explicar código (depreciado — use o RAG para levantamento)
+.\.venv\Scripts\python.exe -m cli explain --file app/views/vagas.php --symbol listar
+
+# Dependências do arquivo (+ --project para classificar módulo e tabelas)
+.\.venv\Scripts\python.exe -m cli deps --file app/views/vagas.php --project exemplo-garagens
 ```
 
-### Falha de aplicação
-
-Se o JSON do LLM falhar no parse/validação, **nada é escrito** (RNF-04: escrita atômica
-via tmp + `os.replace`) e um prompt de autocorreção é reenviado, até `--max-retries`
-vezes — padrão 3.
+Em falha de parse/validação, **nada é escrito** (RNF-04: escrita atômica via tmp +
+`os.replace`) e um prompt de autocorreção é reenviado até `--max-retries` (padrão 3).
 
 ## Testes
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q          # suíte completa
-.\.venv\Scripts\python.exe -m pytest tests/test_applier.py -q   # arquivo único
-.\.venv\Scripts\python.exe -m pytest -k replace_symbol -q       # por nome
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 Os testes do backend LLM usam um servidor HTTP `ThreadingHTTPServer` in-process
-(porta efêmera) simulando a API do Ollama — sem navegador nem serviço externo.
+simulando a API do Ollama; o RAG é testado com subprocess mockado — sem navegador nem
+serviços externos.
 
 ## Arquitetura (CLI)
 
 ```text
 cli/
-├── main.py        # Click: comandos refactor/generate/explain/deps; retry RNF-04
-├── llm_client.py  # Cliente HTTP /api/chat compatível com Ollama (urllib, stdlib)
-├── prompts.py     # Builders de prompt (schema §5 injetado; explain/generate/retry)
-├── applier.py     # Pydantic + ações create_file / replace_symbol / patch_diff; escrita atômica
-└── reducers/      # Tree-Sitter PHP/JS/Python: extract_skeleton, extract_dependencies, find_symbol_range
+├── main.py              # Click: run (motor) | ask | refactor | generate | explain | deps
+├── llm_client.py        # Cliente HTTP /api/chat compatível com Ollama (urllib, stdlib)
+├── prompts.py           # Builders de prompt; contrato multi-arquivo do motor run
+├── applier.py           # Aplicador atômico multi-arquivo (create/replace/patch) em batch
+├── instruction/         # Loader de specs/skills/prompts do diretório de config
+├── project/             # Premissas por projeto (yaml) + scanner de dependências/banco
+├── rag_client.py        # Integração com local-rag-system (subprocess)
+└── reducers/            # Tree-Sitter PHP/JS/Python: esqueleto, deps, find_symbol_range
 ```
 
-Contratos estáveis (não mudar sem atualizar a spec):
+## Contratos estáveis (não mudar sem atualizar a spec)
 
 - Placeholder de omissão: `// ... [Omitted by CapoeiraCode] ...`
-- Backend LLM: `POST {base_url}/api/chat` (JSON Ollama: `{model, stream:false, messages}`),
-  sem chaves de API — reaproveita o backend local
-- Schema de resposta do LLM: `file_path`, `action` (`replace_symbol|create_file|patch_diff`),
-  `code_content` (obrigatórios), `target_symbol`, `explanation`
-- `create_file` e `patch_diff` validam o `file_path` retornado; em `replace_symbol` o
-  byte-range vem do Tree-Sitter e o resultado é re-parseado antes de gravar
+- Backend LLM: `POST {base_url}/api/chat` (JSON Ollama `{model, stream:false, messages}`)
+- Schema de resposta: ação única `{file_path, action, code_content, ...}` **ou** lote
+  `{"files": [...]}` (multi-arquivo); `action ∈ replace_symbol|create_file|patch_diff`
+- RNF-04: falha ⇒ nada é escrito; multi-arquivo é all-or-nothing
+- Diretório de config: `CAPOEIRA_CONFIG_DIR` → `%APPDATA%\CapoeiraCode` → `~/.capoeira`

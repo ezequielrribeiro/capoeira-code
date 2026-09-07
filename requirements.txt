@@ -4,3 +4,4 @@ tree-sitter-javascript>=0.23
 tree-sitter-python>=0.23
 click>=8.1.7
 pydantic>=2.7.0
+PyYAML>=6.0

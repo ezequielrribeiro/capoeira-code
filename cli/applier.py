@@ -10,7 +10,7 @@ from .reducers import get_reducer_for_path
 
 
 class CapoeiraResponse(BaseModel):
-    """Contrato de resposta do LLM (spec secao 5)."""
+    """Contrato de resposta do LLM (spec secao 5) - acao unica (compat)."""
 
     file_path: str = Field(description="Caminho do arquivo a ser modificado")
     action: Literal["replace_symbol", "create_file", "patch_diff"] = Field(description="Ação a aplicar")
@@ -19,60 +19,119 @@ class CapoeiraResponse(BaseModel):
     explanation: str = Field(default="", description="Resumo de 1 linha da alteração")
 
 
+class CapoeiraBatch(BaseModel):
+    """Resposta multi-arquivo: lista de ações aplicadas atomicamente em conjunto."""
+
+    files: list[CapoeiraResponse] = Field(min_length=1, description="Uma ou mais ações atômicas")
+
+
 @dataclass
 class ApplyResult:
     ok: bool
     message: str = ""
     error: str = ""
     payload: CapoeiraResponse | None = field(default=None, repr=False)
+    staged: dict[str, str] | None = field(default=None, repr=False)
 
 
 class ChangeApplier:
-    """Aplicador atômico do JSON retornado pelo LLM.
+    """Aplicador atomico do JSON retornado pelo LLM.
 
     RNF-04: qualquer falha (JSON inválido, schema, símbolo ausente, diff que
     não confere) resulta em ApplyResult(ok=False) SEM modificar arquivos.
+    No formato multi-arquivo ('files': [...]), todas as ações são preparadas
+    em memoria e so depois gravadas - ou grava tudo, ou não grava nada.
     """
 
     @staticmethod
     def apply_payload(raw_json_str: str, expected_file_path: str | None = None) -> ApplyResult:
+        """Prepara (stage) e grava (commit) as ações. Atomicidade RNF-04."""
+        result = ChangeApplier.stage_payload(raw_json_str, expected_file_path)
+        if not result.ok or not result.staged:
+            return result
         try:
-            payload = ChangeApplier._parse_payload(raw_json_str)
+            ChangeApplier.commit_staged(result.staged)
+        except Exception as e:
+            return ApplyResult(ok=False, error=f"Falha ao gravar as alterações: {e}")
+        return result
+
+    # ------------------------------------------------------------------
+    # Staging: prepara tudo em memória sem tocar no disco
+    # ------------------------------------------------------------------
+    @staticmethod
+    def stage_payload(raw_json_str: str, expected_file_path: str | None = None) -> ApplyResult:
+        try:
+            actions = ChangeApplier._parse_actions(raw_json_str)
         except ValueError as e:
             return ApplyResult(ok=False, error=str(e))
 
-        if expected_file_path is not None and payload.file_path != expected_file_path:
-            return ApplyResult(
-                ok=False,
-                error=(
-                    f"Caminho inesperado na resposta ({payload.file_path!r}); "
-                    f"nada foi escrito. Esperado: {expected_file_path}"
-                ),
-            )
-
+        staged: dict[str, str] = {}
+        falha = ""
         try:
-            if payload.action == "create_file":
-                ChangeApplier._apply_create_file(payload)
-            elif payload.action == "replace_symbol":
-                ChangeApplier._apply_replace_symbol(payload)
-            elif payload.action == "patch_diff":
-                ChangeApplier._apply_patch_diff(payload)
-            else:  # defesa extra; o Literal do pydantic já barra
-                return ApplyResult(ok=False, error=f"Ação desconhecida: {payload.action}")
+            if expected_file_path is not None:
+                if len(actions) != 1 or actions[0].file_path != expected_file_path:
+                    raise ValueError(
+                        f"Caminho inesperado na resposta ({actions[0].file_path!r}); "
+                        f"nada foi escrito. Esperado: {expected_file_path}"
+                    )
+            for action in actions:
+                falha = action.file_path
+                ChangeApplier._stage_action(action, staged)
         except Exception as e:
-            return ApplyResult(ok=False, error=f"Falha ao aplicar '{payload.action}': {e}")
+            rota = falha if falha else (actions[0].file_path if actions else "")
+            return ApplyResult(ok=False, error=f"Falha ao validar '{rota}': {e}")
 
+        solo = actions[0] if len(actions) == 1 else None
         return ApplyResult(
             ok=True,
-            message=f"Alteração aplicada em {payload.file_path}: {payload.explanation}",
-            payload=payload,
+            message=ChangeApplier._message(actions, staged),
+            payload=solo,
+            staged=staged,
         )
 
+    @staticmethod
+    def commit_staged(staged: dict[str, str]) -> None:
+        """Grava todos os arquivos de uma vez (tmp + os.replace por arquivo)."""
+        for path, content in staged.items():
+            directory = os.path.dirname(os.path.abspath(path))
+            os.makedirs(directory, exist_ok=True)
+            ChangeApplier._atomic_write(path, content)
+
+    @staticmethod
+    def _stage_action(action: CapoeiraResponse, staged: dict[str, str]) -> None:
+        path = action.file_path
+        if action.action == "create_file":
+            staged[path] = action.code_content
+            return
+
+        original = staged.get(path)
+        if original is None:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"Arquivo não encontrado: {path}")
+            with open(path, "r", encoding="utf-8") as f:
+                original = f.read()
+
+        if action.action == "replace_symbol":
+            if not action.target_symbol:
+                raise ValueError("Ação 'replace_symbol' exige a propriedade 'target_symbol'.")
+            reducer = get_reducer_for_path(path)
+            symbol_range = reducer.find_symbol_range(original, action.target_symbol)
+            if symbol_range is None:
+                raise ValueError(f"Símbolo '{action.target_symbol}' não encontrado em {path}.")
+            data = original.encode("utf8")
+            start, end = symbol_range
+            updated = (data[:start] + action.code_content.encode("utf8") + data[end:]).decode("utf8")
+            if reducer.has_parse_errors(updated):
+                raise ValueError("O código resultante tem erros de sintaxe; nada foi escrito.")
+            staged[path] = updated
+        else:  # patch_diff
+            staged[path] = apply_unified_diff(original, action.code_content)
+
     # ------------------------------------------------------------------
-    # Parsing da resposta do LLM
+    # Parsing da resposta do LLM (única ou batch)
     # ------------------------------------------------------------------
     @staticmethod
-    def _parse_payload(raw: str) -> CapoeiraResponse:
+    def _parse_actions(raw: str) -> list[CapoeiraResponse]:
         if not raw or not raw.strip():
             raise ValueError("Resposta vazia do LLM.")
 
@@ -91,54 +150,26 @@ class ChangeApplier:
         except json.JSONDecodeError as e:
             raise ValueError(f"JSON inválido na resposta do LLM: {e}") from e
 
+        if isinstance(data, dict) and isinstance(data.get("files"), list):
+            try:
+                return CapoeiraBatch(**data).files
+            except ValidationError as e:
+                raise ValueError(f"Resposta batch fora do schema esperado: {e}") from e
+
         try:
-            return CapoeiraResponse(**data)
+            return [CapoeiraResponse(**data)]
         except ValidationError as e:
             raise ValueError(f"Resposta fora do schema esperado: {e}") from e
 
-    # ------------------------------------------------------------------
-    # Ações
-    # ------------------------------------------------------------------
     @staticmethod
-    def _apply_create_file(payload: CapoeiraResponse) -> None:
-        directory = os.path.dirname(os.path.abspath(payload.file_path))
-        os.makedirs(directory, exist_ok=True)
-        ChangeApplier._atomic_write(payload.file_path, payload.code_content)
-
-    @staticmethod
-    def _apply_replace_symbol(payload: CapoeiraResponse) -> None:
-        if not payload.target_symbol:
-            raise ValueError("Ação 'replace_symbol' exige a propriedade 'target_symbol'.")
-        if not os.path.isfile(payload.file_path):
-            raise FileNotFoundError(f"Arquivo não encontrado: {payload.file_path}")
-
-        reducer = get_reducer_for_path(payload.file_path)
-        with open(payload.file_path, "r", encoding="utf-8") as f:
-            original = f.read()
-
-        symbol_range = reducer.find_symbol_range(original, payload.target_symbol)
-        if symbol_range is None:
-            raise ValueError(
-                f"Símbolo '{payload.target_symbol}' não encontrado em {payload.file_path}."
-            )
-
-        data = original.encode("utf8")
-        start, end = symbol_range
-        updated = (data[:start] + payload.code_content.encode("utf8") + data[end:]).decode("utf8")
-
-        if reducer.has_parse_errors(updated):
-            raise ValueError("O código resultante tem erros de sintaxe; nada foi escrito.")
-
-        ChangeApplier._atomic_write(payload.file_path, updated)
-
-    @staticmethod
-    def _apply_patch_diff(payload: CapoeiraResponse) -> None:
-        if not os.path.isfile(payload.file_path):
-            raise FileNotFoundError(f"Arquivo não encontrado: {payload.file_path}")
-        with open(payload.file_path, "r", encoding="utf-8") as f:
-            original = f.read()
-        updated = apply_unified_diff(original, payload.code_content)
-        ChangeApplier._atomic_write(payload.file_path, updated)
+    def _message(actions: list[CapoeiraResponse], staged: dict[str, str]) -> str:
+        total = len(actions)
+        if total == 1:
+            a = actions[0]
+            return f"Alteração aplicada em {a.file_path}: {a.explanation}"
+        resumos = ", ".join(a.explanation or a.action for a in actions[:3])
+        extra = "" if total <= 3 else f" (+{total - 3} mais)"
+        return f"Alterações aplicadas em {total} arquivo(s): {resumos}{extra}"
 
     # ------------------------------------------------------------------
     # Escrita atômica (tmp + os.replace): ou grava tudo, ou nada

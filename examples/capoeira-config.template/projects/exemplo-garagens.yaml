@@ -1,0 +1,49 @@
+# Exemplo de premissas por projeto (projects/<nome>.yaml)
+# Copie para o diretório de config do CapoeiraCode:
+#   Windows: %APPDATA%\CapoeiraCode\projects\
+#   Linux/macOS: ~/.capoeira/projects/
+# Ou defina CAPOEIRA_CONFIG_DIR apontando para o seu diretório de config.
+name: exemplo-garagens
+description: Sistema legado PHP de gerenciamento de garagens (exemplo)
+
+stack:
+  language: php
+  template_engine: null            # ou "smarty", "twig"
+  project_root: "C:/sistemas/garagens"
+  structure:
+    controllers: "app/controllers"
+    models: "app/models"
+    views: "app/views"
+    css: "public/assets/css"
+    migrations: "database/migrations"
+  conventions:
+    - "Cada tela (view) inicia com require_once 'app/views/layouts/topo.php' e termina com rodape.php"
+    - "Nomes de telas em lowerCamelCase.php; métodos de controller em camelCase"
+    - "Acesso ao banco apenas via classe PDO centralizada (app/models/Db.php)"
+    - "Mensagens ao usuário sempre em pt-BR, via helpers em app/views/helpers"
+
+banco:
+  dsn: null
+  schema_file: "database/schema.sql"   # dump CREATE TABLE para cruzar com o código
+
+frontend:
+  css_classes: ["btn", "card", "table", "alert", "form-control"]
+  components: ["layout de topo/rodape", "menu lateral", "tabela padrao"]
+
+rag:
+  working_dir: "C:/projetos/local-rag-system"   # onde rodar `python main.py`
+  python: null                                   # default "python"
+  doc_types: { user: user, tech: tech, support: support }
+
+specs:            # arquivos em <config>/specs/ (omita para carregar todos)
+  - "00-arquitetura"
+  - "01-padroes-telas"
+skills:           # arquivos em <config>/skills/
+  - "criar-tela"
+  - "corrigir-bug"
+  - "otimizar"
+prompts:          # arquivos em <config>/prompts/ (fluxos pré-escritos)
+  - "new-screen"
+  - "bugfix"
+  - "optimize"
+  - "frontend"

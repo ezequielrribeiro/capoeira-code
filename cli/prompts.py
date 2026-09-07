@@ -73,3 +73,58 @@ Responda APENAS com o JSON corrigido, sem nenhum texto adicional.
 ---
 {original_prompt}
 """
+
+
+# Contrato de resposta do motor `run`: uma ação única OU um lote multi-arquivo.
+RUN_RESPONSE_CONTRACT = """Responda APENAS com um JSON válido, em português, escolhendo UMA das formas:
+
+1) Ação única (uma mudança):
+{
+  "file_path": "caminho/arquivo.php",
+  "action": "create_file | replace_symbol | patch_diff",
+  "target_symbol": "nome_do_simbolo",   // obrigatório se action = replace_symbol
+  "code_content": "conteúdo completo ou unified diff",
+  "explanation": "resumo de 1 linha"
+}
+
+2) Lote multi-arquivo (várias mudanças numa resposta — use quando tocar em 2+ arquivos):
+{
+  "files": [
+    { "file_path": "...", "action": "create_file", "code_content": "...", "explanation": "..." },
+    { "file_path": "...", "action": "replace_symbol", "target_symbol": "...", "code_content": "...", "explanation": "..." },
+    { "file_path": "...", "action": "patch_diff", "code_content": "...", "explanation": "..." }
+  ]
+}
+
+Regras:
+- "file_path" sempre relativo ou absoluto (caminho real do arquivo no projeto).
+- Sobre "code_content": conteúdo completo do arquivo (create_file), definição completa
+  do símbolo (replace_symbol), ou unified diff com contexto (patch_diff).
+- Não escreva código em "explanation"; resuma em 1 linha."""
+
+
+def build_run_prompt(
+    instruction: str,
+    profile: str,
+    specs: str = "",
+    skills: str = "",
+    context_files: str = "",
+    rag_context: str = "",
+    prompt_template: str = "",
+) -> str:
+    sections = []
+    if prompt_template:
+        sections.append(f"## DIRETRIZES DA TAREFA\n{prompt_template.strip()}")
+    sections.append(f"## PERFIL DO PROJETO\n{profile.strip() or '(sem projeto configurado)'}")
+    if specs:
+        sections.append(f"## ESPECIFICAÇÕES / PADRÕES DO SISTEMA\n{specs}")
+    if skills:
+        sections.append(f"## PROCEDIMENTOS DISPONÍVEIS\n{skills}")
+    if rag_context:
+        sections.append(f"## CONTEXTO DA BASE DE CONHECIMENTO (RAG)\n{rag_context}")
+    if context_files:
+        sections.append(f"## CÓDIGO DE CONTEXTO (esqueleto)\n{context_files}")
+
+    sections.append(f"## INSTRUÇÃO\n{instruction.strip()}")
+    sections.append(f"## CONTRATO DE RESPOSTA\n{RUN_RESPONSE_CONTRACT}")
+    return "\n\n".join(sections)

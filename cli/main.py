@@ -1,15 +1,20 @@
+import difflib
 import sys
 
 import click
 
 from .applier import ChangeApplier
+from .instruction import load_instruction_set, render_project_profile
 from .llm_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_TIMEOUT, LLMClient, LLMRequestError
+from .project import load_premises, resolve_config_dir, scan_file
 from .prompts import (
     build_explain_prompt,
     build_generate_prompt,
     build_refactor_prompt,
     build_retry_prompt,
+    build_run_prompt,
 )
+from .rag_client import RagClient, RagError, RagNotConfiguredError
 from .reducers import get_reducer_for_path
 
 
@@ -175,6 +180,176 @@ def run_deps(file_path: str) -> bool:
     return True
 
 
+def run_deps_project(file_path: str, project: str) -> bool:
+    config_dir = resolve_config_dir()
+    try:
+        premises = load_premises(config_dir, project)
+        perfil = scan_file(file_path, premises)
+    except (FileNotFoundError, ValueError) as e:
+        click.echo(click.style(str(e), fg="red"), err=True)
+        return False
+
+    click.echo(f"Módulo: {perfil['classification']}")
+    click.echo("Dependências do arquivo:")
+    for dep in perfil["dependencies"] or [">< nenhuma"]:
+        click.echo(f"  - {dep}")
+    click.echo("Tabelas tocadas (SQL):")
+    for t in perfil["sql_tables"] or [">< nenhuma"]:
+        click.echo(f"  - {t}")
+    return True
+
+
+def _skeletons_for(paths: list[str]) -> str:
+    blocos = []
+    for path in paths:
+        try:
+            blocos.append(f"# {path}\n{_extract_skeleton(path, None)}")
+        except (ValueError, FileNotFoundError):
+            click.echo(click.style(f"Ignorando arquivo de contexto: {path}", fg="yellow"), err=True)
+    return "\n\n".join(blocos)
+
+
+def _render_diff(staged: dict[str, str]) -> None:
+    for path, novo in staged.items():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                original = f.read()
+        except FileNotFoundError:
+            original = ""
+        click.echo(click.style(f"\n=== {path} ({'+novo' if not original else 'modificado'}) ===", fg="cyan"))
+        if not original:
+            for line in novo.splitlines():
+                click.echo(click.style(f"+ {line}", fg="green"))
+            continue
+        for line in difflib.unified_diff(original.splitlines(), novo.splitlines(), lineterm=""):
+            if line.startswith("+") and not line.startswith("+++"):
+                click.echo(click.style(line, fg="green"))
+            elif line.startswith("-") and not line.startswith("---"):
+                click.echo(click.style(line, fg="red"))
+            elif line.startswith("@@"):
+                click.echo(click.style(line, fg="cyan"))
+            else:
+                click.echo(line)
+
+
+def run_run(
+    instruction: str,
+    project: str | None,
+    prompt_name: str | None,
+    skill_name: str | None,
+    files: list[str],
+    context_files: list[str],
+    rag_query: str | None,
+    rag_doc_type: str | None,
+    dry_run: bool,
+    base_url: str,
+    model: str,
+    timeout: float,
+    max_retries: int,
+) -> bool:
+    config_dir = resolve_config_dir()
+    try:
+        premises = load_premises(config_dir, project or "")
+    except (FileNotFoundError, ValueError) as e:
+        click.echo(click.style(str(e), fg="red"), err=True)
+        return False
+
+    instr_set = load_instruction_set(config_dir, premises)
+    profile = render_project_profile(premises)
+    specs = instr_set.specs_combined
+
+    if skill_name:
+        skill = instr_set.get_prompt(skill_name + ".md")
+        skills = skill or instr_set.skills_combined
+        if not skill:
+            click.echo(click.style(f"Skill '{skill_name}' não encontrada; usando todas.", fg="yellow"), err=True)
+    else:
+        skills = instr_set.skills_combined
+
+    prompt_template = instr_set.get_prompt((prompt_name or "") + ".md")
+    if prompt_name and not prompt_template:
+        click.echo(click.style(f"Template '{prompt_name}' não encontrado em prompts/.", fg="yellow"), err=True)
+
+    context = _skeletons_for(list(files) + list(context_files))
+
+    rag_context = ""
+    if rag_query:
+        try:
+            rag_client = RagClient(premises)
+            rag_context = rag_client.ask(rag_query, rag_doc_type)
+        except (RagNotConfiguredError, RagError) as e:
+            click.echo(click.style(str(e), fg="yellow"), err=True)
+
+    prompt = build_run_prompt(
+        instruction, profile, specs=specs, skills=skills,
+        context_files=context, rag_context=rag_context, prompt_template=prompt_template,
+    )
+    client = LLMClient(base_url=base_url, model=model, timeout=timeout)
+
+    current_prompt = prompt
+    for attempt in range(1, max_retries + 1):
+        try:
+            raw_response = client.chat(current_prompt)
+        except LLMRequestError as e:
+            click.echo(click.style(str(e), fg="red"), err=True)
+            return False
+
+        result = ChangeApplier.stage_payload(raw_response)
+        if not result.ok:
+            click.echo(
+                click.style(f"[Tentativa {attempt}/{max_retries}] {result.error}", fg="yellow"),
+                err=True,
+            )
+            current_prompt = build_retry_prompt(prompt, result.error)
+            continue
+
+        if dry_run:
+            click.echo(click.style("RASCUNHO (dry-run) — nada foi gravado.", fg="cyan"))
+            _render_diff(result.staged)
+            if click.confirm("\nAplicar as alterações?", default=False):
+                try:
+                    ChangeApplier.commit_staged(result.staged)
+                except Exception as e:
+                    click.echo(click.style(f"Falha ao gravar: {e}", fg="red"), err=True)
+                    return False
+                click.echo(click.style(f"Concluído! {result.message}", fg="green"))
+            else:
+                click.echo("Nada aplicado.")
+            return True
+
+        try:
+            ChangeApplier.commit_staged(result.staged)
+        except Exception as e:
+            click.echo(click.style(f"Falha ao gravar: {e}", fg="red"), err=True)
+            return False
+        click.echo(click.style(f"Concluído! {result.message}", fg="green"))
+        return True
+
+    click.echo(click.style("Falha após todas as tentativas.", fg="red"), err=True)
+    return False
+
+
+def run_ask(query: str, doc_type: str | None, project: str | None) -> bool:
+    config_dir = resolve_config_dir()
+    try:
+        premises = load_premises(config_dir, project or "")
+        rag_client = RagClient(premises)
+    except (FileNotFoundError, ValueError) as e:
+        click.echo(click.style(str(e), fg="red"), err=True)
+        return False
+    except RagNotConfiguredError as e:
+        click.echo(click.style(str(e), fg="red"), err=True)
+        return False
+
+    try:
+        output = rag_client.ask(query, doc_type)
+    except RagError as e:
+        click.echo(click.style(str(e), fg="red"), err=True)
+        return False
+    click.echo(output)
+    return True
+
+
 @click.group()
 def cli():
     """CapoeiraCode CLI - Agente para desenvolvimento e refatoração em sistemas legados.
@@ -240,11 +415,83 @@ def explain(file_path, symbol, base_url, model, timeout):
 
 
 @cli.command()
+@click.argument("instruction")
+@click.option("--project", default=None, help="Nome do arquivo de premissas (projects/<nome>.yaml)")
+@click.option("--prompt", "prompt_name", default=None, help="Template de fluxo em prompts/ (ex.: new-screen, bugfix)")
+@click.option("--skill", "skill_name", default=None, help="Skill em skills/ a destacar no procedimento")
+@click.option("--file", "files", multiple=True, help="Arquivo(s) de código do sistema para contexto (pode repetir)")
+@click.option("--context", "context_files", multiple=True, help="Arquivo(s) adicionais de contexto (pode repetir)")
+@click.option("--rag", "rag_query", default=None, help="Consulta ao local-rag-system para injetar contexto")
+@click.option("--doc-type", "rag_doc_type", default=None, type=click.Choice(["user", "tech", "support"]))
+@click.option("--dry-run", is_flag=True, help="Mostra o diff e pede confirmação antes de aplicar")
+@click.option("--max-retries", default=3, show_default=True, help="Tentativas de autocorreção (RNF-04)")
+@llm_options
+def run(
+    instruction,
+    project,
+    prompt_name,
+    skill_name,
+    files,
+    context_files,
+    rag_query,
+    rag_doc_type,
+    dry_run,
+    base_url,
+    model,
+    timeout,
+    max_retries,
+):
+    """Motor de instrução: você descreve o que quer e o LLM decide as ações.
+
+    Responde em formato de ações (create_file / replace_symbol / patch_diff),
+    incluindo lote multi-arquivo, aplicadas atomicamente (RNF-04).
+    """
+    try:
+        success = run_run(
+            instruction,
+            project,
+            prompt_name,
+            skill_name,
+            list(files),
+            list(context_files),
+            rag_query,
+            rag_doc_type,
+            dry_run,
+            base_url,
+            model,
+            timeout,
+            max_retries,
+        )
+    except KeyboardInterrupt:
+        click.echo("\nOperação cancelada pelo usuário.")
+        success = False
+    sys.exit(0 if success else 1)
+
+
+@cli.command("ask")
+@click.argument("query")
+@click.option("--project", default=None, help="Projeto cujas premissas apontam o RAG")
+@click.option("--doc-type", default=None, type=click.Choice(["user", "tech", "support"]))
+def ask(query, project, doc_type):
+    """Consulta o local-rag-system (CLI via subprocess) e devolve o contexto."""
+    try:
+        success = run_ask(query, doc_type, project)
+    except KeyboardInterrupt:
+        click.echo("\nOperação cancelada pelo usuário.")
+        success = False
+    sys.exit(0 if success else 1)
+
+
+@cli.command()
 @click.option("--file", "file_path", required=True, help="Caminho do arquivo")
-def deps(file_path):
+@click.option("--project", default=None, help="Nome das premissas para classificar o módulo e mostrar tabelas")
+def deps(file_path, project):
     """Lista dependências (imports/requires) do arquivo - sem LLM."""
     try:
-        success = run_deps(file_path)
+        if project:
+            success = run_deps_project(file_path, project)
+        else:
+            success = run_deps(file_path)
     except FileNotFoundError:
         click.echo(click.style(f"Arquivo não encontrado: {file_path}", fg="red"), err=True)
         success = False
