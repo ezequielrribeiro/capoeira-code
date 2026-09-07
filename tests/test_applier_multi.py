@@ -5,7 +5,6 @@ from pathlib import Path
 import click.testing
 import pytest
 
-from cli.main import cli
 from cli.rag_client import RagClient
 
 FIXTURE_PHP = Path(__file__).parent / "fixtures" / "legacy_calculator.php"

@@ -10,6 +10,8 @@ from rich.console import Console
 from ..llm_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_TIMEOUT, LLMClient
 from ..instruction.loader import load_instruction_set
 from ..project.premises import EMPTY_PREMISES, load_premises, resolve_config_dir
+from ..project.scanner import scan_file
+from ..rag_client import RagClient, RagError, RagNotConfiguredError
 from .agent import AgentOptions, AgentRun
 from .bootstrap import bootstrap_instruction
 from .scan_artifacts import artifacts_summary, generate_artifacts, is_empty_project
@@ -24,12 +26,14 @@ _HELP = """/help            - esta ajuda
 /bootstrap       - cria um sistema do zero (pergunta stack/banco; gera .sql)
 /max-turns N    - limite de turnos do agente (padrão 20)
 /readonly       - alterna modo somente-leitura (bloqueia execução/escrita)
+/ask <pergunta> [--doc-type T]  - consulta o local-rag-system (contexto/docs)
+/deps <arquivo> - lista módulo, dependências e tabelas SQL de um arquivo
 /quit           - sai da TUI
 """
 
 _COMMANDS = [
     "/help", "/model", "/base-url", "/premises", "/rescan", "/reset",
-    "/bootstrap", "/max-turns", "/readonly", "/quit", "/exit",
+    "/bootstrap", "/max-turns", "/readonly", "/ask", "/deps", "/quit", "/exit",
 ]
 
 
@@ -161,6 +165,35 @@ def _reload_premises(config_dir, name: str, console: Console, warn: bool = False
         return EMPTY_PREMISES
 
 
+def _ask_query(premises, query: str, doc_type: str | None = None) -> str:
+    """Consulta o local-rag-system (subprocess) e devolve o texto de contexto."""
+    try:
+        client = RagClient(premises)
+    except RagNotConfiguredError as e:
+        return str(e)
+    try:
+        return client.ask(query, doc_type)
+    except RagError as e:
+        return f"ERRO: {e}"
+
+
+def _deps_report(premises, path: str) -> str:
+    """Relatório local de módulo/dependências/tabelas de um arquivo (sem LLM)."""
+    if not os.path.isfile(path):
+        return f"Arquivo não encontrado: {path}"
+    try:
+        perfil = scan_file(path, premises)
+    except ValueError as e:
+        return f"ERRO: {e}"
+    deps = perfil["dependencies"] or []
+    tables = perfil["sql_tables"] or []
+    lines = [f"Módulo: {perfil['classification']}", "Dependências:"]
+    lines.extend(f"  - {d}" for d in deps) or lines.append("  (nenhuma)")
+    lines.append("Tabelas SQL:")
+    lines.extend(f"  - {t}" for t in tables) or lines.append("  (nenhuma)")
+    return "\n".join(lines)
+
+
 def _handle_slash(
     text: str,
     console: Console,
@@ -220,6 +253,27 @@ def _handle_slash(
         agent.gate.mode = options.mode
         state = "somente-leitura" if options.mode == "readonly" else "leitura+escrita (com aprovação)"
         console.print(f"Modo permissão: {state}")
+    elif cmd == "/ask":
+        query, doc_type = _split_ask(arg)
+        if not query:
+            console.print("[red]Uso: /ask <pergunta> [--doc-type user|tech|support][/red]")
+        else:
+            console.print(_ask_query(premises, query, doc_type))
+    elif cmd == "/deps":
+        if not arg:
+            console.print("[red]Uso: /deps <arquivo>[/red]")
+        else:
+            path = arg if os.path.isabs(arg) else os.path.join(session.project_path, arg)
+            console.print(_deps_report(premises, os.path.normpath(path)))
     else:
         console.print("[red]Comando desconhecido.[/red] /help para a lista.")
     return True
+
+
+def _split_ask(arg: str) -> tuple[str, str | None]:
+    """Separa `/<pergunta> [--doc-type T]` -> (pergunta, doc_type)."""
+    if "--doc-type" in arg:
+        query, _, rest = arg.partition("--doc-type")
+        doc_type = rest.strip().split()[0] if rest.strip() else None
+        return query.strip(), doc_type
+    return arg.strip(), None

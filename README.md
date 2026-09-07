@@ -1,22 +1,17 @@
 # CapoeiraCode
 
-Agente CLI para manutenção, refatoração, criação de telas/artefatos e **automação de
-rotina** em **sistemas legados** (foco inicial em PHP). O CLI reduz o contexto do código
-via AST (Tree-Sitter) e conversa com um **backend compatível com a API do Ollama** —
-tanto o [Ollama](https://ollama.com) nativo quanto o gateway
+Agente **interativo (TUI)** para manutenção, refatoração, criação de telas/artefatos e
+**automação de rotina** em **sistemas legados** (foco inicial em PHP). O CapoeiraCode reduz
+o contexto do código via AST (Tree-Sitter) e conversa com um **backend compatível com a API
+do Ollama** — tanto o [Ollama](https://ollama.com) nativo quanto o gateway
 [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host) — via HTTP/JSON
 (`POST /api/chat`). Sem navegador, sem extensão, sem ponte WebSocket.
 
-O CapoeiraCode também funciona como um **motor de instrução declarativo** (estilo OpenCode):
-você escreve `specs`, `skills` e `prompts` em arquivos e o LLM decide as ações (inclusive
-lote multi-arquivo), aplicadas atomicamente — sem subcomandos fixos por fluxo.
-
-E, na v4.0.0, entra o **modo agente interativo (TUI)**: `capoeira [PATH]` inicia na raiz do
-projeto, cria um workspace de sessão com artefatos de scan e roda um **loop de
-desenvolvimento** em que o LLM pode pedir leituras de arquivos, comandos shell/python e
-aplicações — como no chat do Gemini/Copilot, mas local e atômico.
-Na v4.1.0 dá para **criar um sistema do zero**: em pasta vazia a TUI sugere `/bootstrap`,
-que pergunta a stack e gera a base (+ `.sql`), com streaming da resposta.
+**Toda a interação é pela TUI** (`capoeira [PATH]`): você escreve instruções livres e o
+agente decide as ações — lendo arquivos, executando comandos e aplicando mudanças
+atômicas (multi-arquivo) — como no chat do Gemini/Copilot, mas local. Stack e padrões são
+definidos por você em arquivos `.md` (`specs/`, `skills/`, `prompts/`, `blueprints/`) no
+diretório de config ou no próprio prompt.
 
 A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoeira-code-spec.md).
 
@@ -24,13 +19,12 @@ A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoei
 
 | Componente | Status |
 | --- | --- |
-| CLI Python (reducers PHP/JS/Python, applier multi-arquivo, cliente Ollama) | ✅ Implementado e testado |
-| Motor de instrução (`run`), `ask` (RAG), `deps --project` | ✅ Implementados e testados |
-| **Modo agente/TUI** (`capoeira [PATH]`), sessão, scan e ferramentas | ✅ Implementados e testados |
-| **Criar do zero**: bootstrap, streaming e `blueprints/` | ✅ Implementados e testados |
+| Modo agente/TUI (`capoeira [PATH]`), sessão, scan e ferramentas | ✅ Implementado e testado |
+| Criar do zero: bootstrap, streaming e `blueprints/` | ✅ Implementados e testados |
 | Premissas por projeto (`projects/*.yaml`) + scanner de dependências | ✅ Implementados |
+| `/ask` (RAG) e `/deps` (scan local) dentro da TUI | ✅ Implementados e testados |
 | Reducers HTML/CSS/SQL | ⏳ Futuro |
-| Sessão múltipla por projeto, `--json`, streaming (`stream:true`) | ⏳ Futuro |
+| Sessão múltipla por projeto, `--json` | ⏳ Futuro |
 
 ## Requisitos
 
@@ -39,62 +33,74 @@ A especificação completa está em [`specs/capoeira-code-spec.md`](specs/capoei
   - **CapoeiraHost** (padrão): `python -m server.main` em `http://127.0.0.1:8765` (subir também a extensão no navegador com uma aba logada do provedor), ou
   - **Ollama nativo**: `ollama serve` em `http://127.0.0.1:11434` com algum modelo (`ollama pull qwen2.5-coder`).
 - **Opcional** — [local-rag-system](https://github.com/ezequielrribeiro/local-rag-system)
-  para injetar contexto (docs/tickets) via `--rag`/`ask`.
+  para contexto (docs/tickets) via `/ask` na TUI.
 
 ## Setup
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-# opcional (recomendado): cria os executáveis `capoeira` / `capoeira-code`
-.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m pip install -e .   # cria os executáveis `capoeira` / `capoeira-code`
 ```
 
-## Uso interativo (TUI) — o fluxo "agente"
+## Uso (TUI)
 
 ```powershell
-# sem argumentos usa o diretório atual; com PATH usa a raiz do projeto
-capoeira "C:\sistemas\garagens"
-# ou, sem instalar o entry point:
-.\.venv\Scripts\python.exe -m cli tui "C:\sistemas\garagens"
+capoeira "C:\sistemas\garagens"        # raiz do projeto (padrão: diretório atual)
+capoeira --project garagens --readonly # flags de entrada (veja abaixo)
+# equivalência sem instalar o entry point:
+.\.venv\Scripts\python.exe -m cli "C:\sistemas\garagens"
 ```
+
+Entrada (flags): `--project NOME` (premissas `projects/<nome>.yaml`), `--readonly`
+(bloqueia execução/escrita), `--model M`, `--base-url URL`, `--timeout SEG`, `--help`.
 
 Ao iniciar, o CapoeiraCode:
 1. cria o workspace de sessão em `<config>/configs/garagens/` (`tree.txt`,
-   `dependencies.json`, `asts/`, `session.jsonl`);
-2. carrega premissas (`projects/<slug>.yaml`) e specs/skills/prompts do config;
+   `dependencies.json`, `asts/`, `session.jsonl` — retomável);
+2. carrega premissas (`projects/<slug>.yaml`) e specs/skills/prompts/blueprints do config;
 3. mostra o prompt `capoeira> `. Digite a instrução e pressione `Enter`.
 
 O LLM responde com **passos de ferramentas**: `read_file`, `list_dir`, `run_shell`,
 `run_python`, `write_file`, `ask_user`, `done`. Leituras são automáticas; execução e
-escrita pedem aprovação na TUI (`y`/`n`/`a` = sempre na sessão). Use `--readonly` para
-bloquear execução/escrita. O histórico fica no `session.jsonl` (retoma na próxima execução);
-`Ctrl+C` interrompe o turno; `/reset` limpa a sessão. Respostas chegam em **streaming**.
+escrita pedem aprovação na TUI (`y`/`n`/`a` = sempre na sessão). `Ctrl+C` interrompe o
+turno; `/reset` limpa a sessão. Respostas chegam em **streaming**.
 
 Em um diretório vazio (ou sem stack reconhecido), digite **`/bootstrap`**: o agente pergunta
 a stack, nome e banco, cria a estrutura base e gera `database/schema.sql` +
 `migrations/*.sql` — **você executa os `.sql`** no banco desejado. Defina a stack/estrutura
 nos `.md` do config (`blueprints/`, `specs/`, `skills/`) ou no próprio prompt.
 
-Comandos dentro da TUI: `/help`, `/model M`, `/base-url URL`, `/premises`, `/rescan`,
-`/reset`, `/bootstrap`, `/max-turns N`, `/readonly`, `/quit`.
+### Comandos da TUI
 
-## Uso não-interativo
+| Comando | Descrição |
+| --- | --- |
+| `/help` | ajuda |
+| `/model M`, `/base-url URL` | trocar backend/modelo |
+| `/premises` | recarregar premissas e artefatos do config |
+| `/rescan` | regenerar artefatos de scan do projeto |
+| `/reset` | apagar sessão/histórico e rescaneiar |
+| `/bootstrap` | criar sistema do zero (stack/banco → base + `.sql`) |
+| `/max-turns N` | limite de turnos do agente |
+| `/readonly` | alternar somente-leitura |
+| `/ask <pergunta> [--doc-type user\|tech\|support]` | consultar o `local-rag-system` |
+| `/deps <arquivo>` | módulo, dependências e tabelas SQL de um arquivo (sem LLM) |
+| `/quit` | sair |
 
-Sempre a partir da raiz do repositório. Opções comuns: `--base-url`
-(padrão `http://127.0.0.1:8765`), `--model` (padrão `gemini-pro`) e `--timeout`.
+Em falha de parse/validação, **nada é escrito** (RNF-04: escrita atômica via tmp +
+`os.replace`); no lote multi-arquivo, all-or-nothing.
 
 ## Configuração por projeto (premissas)
 
 Crie um diretório de config do CapoeiraCode (`CAPOEIRA_CONFIG_DIR`, ou
-`%APPDATA%\CapoeiraCode` no Windows, ou `~/.capoeira`) com a seguinte estrutura:
+`%APPDATA%\CapoeiraCode` no Windows, ou `~/.capoeira`) com:
 
 ```text
 CapoeiraCode/
 ├── projects/*.yaml      # premissas por sistema legado (veja examples/)
 ├── specs/*.md           # regras/padrões do sistema (declarativo)
 ├── skills/*.md          # procedimentos que o motor pode usar
-├── prompts/*.md         # fluxos pré-escritos (new-screen, bugfix, bootstrap, ...)
+├── prompts/*.md         # fluxos pré-escritos (bootstrap, new-screen, bugfix, ...)
 └── blueprints/*.md      # exemplos de estrutura/stack (usados no bootstrap/agente)
 ```
 
@@ -102,97 +108,43 @@ Um `projects/<nome>.yaml` descreve stack, estrutura de pastas, convenções, **b
 (schema/dump SQL) e onde roda o `local-rag-system`. Modelo em
 [`examples/capoeira-config.template`](examples/capoeira-config.template).
 
-### `run` — motor de instrução (one-shot)
-
-Você descreve a tarefa e o LLM decide **quais arquivos** criar/editar e com que ação
-(`create_file` / `replace_symbol` / `patch_diff`), em lote multi-arquivo se preciso —
-aplicado atomicamente (RNF-04).
-
-```powershell
-# Nova tela seguindo os prompts/skills do projeto
-.\.venv\Scripts\python.exe -m cli run `
-  "Crie a tela de cadastro de garagens com controller, view, CSS e migração SQL" `
-  --project exemplo-garagens `
-  --prompt new-screen `
-  --skill criar-tela
-
-# Correção de bug com contexto RAG (tickets/docs) e dry-run
-.\.venv\Scripts\python.exe -m cli run `
-  "Corrija o erro de listagem de vagas descrito" `
-  --project exemplo-garagens `
-  --prompt bugfix `
-  --file app/views/vagas.php `
-  --rag "ticket bloqueio no cadastro de vaga" `
-  --doc-type support `
-  --dry-run
-```
-
-`--dry-run` mostra o diff colorido e pede confirmação antes de gravar.
-
-### `ask` — consultar o `local-rag-system`
-
-```powershell
-.\.venv\Scripts\python.exe -m cli ask "Como alterar a senha?" --project exemplo-garagens --doc-type user
-```
-
-### Comandos clássicos (mantidos)
-
-```powershell
-# Refatorar um símbolo específico
-.\.venv\Scripts\python.exe -m cli refactor --file app/models/Db.php --symbol conectar --instruction "..."
-
-# Gerar artefato (testes/esqueleto/docs)
-.\.venv\Scripts\python.exe -m cli generate --file tests/test_Garagens.php --instruction "Crie testes" --context app/models/Garagens.php
-
-# Explicar código (depreciado — use o RAG para levantamento)
-.\.venv\Scripts\python.exe -m cli explain --file app/views/vagas.php --symbol listar
-
-# Dependências do arquivo (+ --project para classificar módulo e tabelas)
-.\.venv\Scripts\python.exe -m cli deps --file app/views/vagas.php --project exemplo-garagens
-```
-
-Em falha de parse/validação, **nada é escrito** (RNF-04: escrita atômica via tmp +
-`os.replace`) e um prompt de autocorreção é reenviado até `--max-retries` (padrão 3).
-
 ## Testes
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Os testes do backend LLM usam um servidor HTTP `ThreadingHTTPServer` in-process
-simulando a API do Ollama; o RAG é testado com subprocess mockado — sem navegador nem
-serviços externos.
+O backend LLM é testado com servidor HTTP `ThreadingHTTPServer` in-process simulando a API
+do Ollama (incluindo streaming NDJSON); RAG e ferramentas com subprocess mockado — sem
+navegador nem serviços externos.
 
-## Arquitetura (CLI)
+## Arquitetura
 
 ```text
 cli/
-├── entry.py             # `capoeira [PATH]` → TUI; subcomandos → Click
-├── main.py              # Click: tui | run | ask | refactor | generate | explain | deps
-├── llm_client.py        # Cliente HTTP /api/chat compatível com Ollama (urllib, stdlib)
-├── prompts.py           # Builders de prompt; contrato multi-arquivo e steps (agente)
-├── applier.py           # Aplicador atômico multi-arquivo (create/replace/patch) em batch
-├── instruction/         # Loader de specs/skills/prompts do diretório de config
+├── entry.py             # `capoeira [PATH] [flags]` → sempre abre a TUI (única interface)
+├── llm_client.py        # Cliente HTTP /api/chat compatível com Ollama (urllib; stream)
+├── prompts.py           # Contratos de prompt; TOOLS_CONTRACT do agente (steps)
+├── applier.py           # Aplicador atômico multi-arquivo (create/replace/patch)
+├── instruction/         # Loader de specs/skills/prompts/blueprints do config
 ├── project/             # Premissas por projeto (yaml) + scanner de dependências/banco
-├── rag_client.py        # Integração com local-rag-system (subprocess)
-├── tui/                 # Modo agente interativo (prompt_toolkit + rich)
-│   ├── app.py           # TUI, /comandos, streaming, auto-sugestão de bootstrap
-│   ├── session.py       # workspace configs/<slug>/ + session.jsonl (retomável)
-│   ├── scan_artifacts.py# tree.txt, dependencies.json, asts/ (+ is_empty_project)
-│   ├── permissions.py   # política (leitura auto; ask/readonly/auto)
-│   ├── tools.py         # executores read/list/run_shell/run_python/write_file
-│   ├── agent.py         # loop de steps até done/max_turns (streaming)
-│   └── bootstrap.py     # instrução/funcões do criar-do-zero (/bootstrap)
-└── reducers/            # Tree-Sitter PHP/JS/Python: esqueleto, deps, find_symbol_range
+├── rag_client.py        # Integração com local-rag-system (subprocess; /ask)
+└── tui/                 # Modo agente interativo (prompt_toolkit + rich)
+    ├── app.py           # TUI + /comandos (inclui /ask e /deps), streaming, bootstrap
+    ├── session.py       # workspace configs/<slug>/ + session.jsonl (retomável)
+    ├── scan_artifacts.py# tree.txt, dependencies.json, asts/ (+ is_empty_project)
+    ├── permissions.py   # política (leitura auto; ask/readonly/auto)
+    ├── tools.py         # executores read/list/run_shell/run_python/write_file
+    ├── agent.py         # loop de steps até done/max_turns (streaming)
+    └── bootstrap.py     # instrução/funções do criar-do-zero (/bootstrap)
 ```
 
 ## Contratos estáveis (não mudar sem atualizar a spec)
 
 - Placeholder de omissão: `// ... [Omitted by CapoeiraCode] ...`
-- Backend LLM: `POST {base_url}/api/chat` (JSON Ollama `{model, stream:false, messages}`)
-- Schema de resposta (one-shot): ação única `{file_path, action, code_content, ...}` **ou** lote
-  `{"files": [...]}` (multi-arquivo); `action ∈ replace_symbol|create_file|patch_diff`
+- Backend LLM: `POST {base_url}/api/chat` (JSON Ollama `{model, stream, messages}`)
+- Schema de resposta (write_file): `{file_path, action, code_content, ...}` com
+  `action ∈ replace_symbol|create_file|patch_diff`; batch `{"files": [...]}` (multi-arquivo)
 - **Agente (TUI)**: resposta `{"steps":[{tool,...}]}` (§5.1 da spec); leitura automática,
   execução/escrita sob política de permissão; resposta em streaming (`stream:true`)
 - RNF-04: falha ⇒ nada é escrito; multi-arquivo é all-or-nothing

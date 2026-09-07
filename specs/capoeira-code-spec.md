@@ -1,8 +1,8 @@
 # 📜 Software Specification & Implementation Architecture: CapoeiraCode
 
 **Projeto:** CapoeiraCode  
-**Versão:** `4.1.0`  
-**Status:** `Approved — Iteração 6 (bootstrap "do zero" + streaming + blueprints) implementada e testada`  
+**Versão:** `5.0.0`  
+**Status:** `Approved — Iteração 7 (interação exclusiva via TUI) implementada e testada`  
 **Data:** 8 de Setembro de 2026  
 
 ---
@@ -27,6 +27,9 @@ textual (prompt_toolkit + rich) que cria um **workspace de sessão** por projeto
 que o LLM responde com **passos de ferramentas** (`read_file`, `list_dir`, `run_shell`,
 `run_python`, `write_file`, `ask_user`, `done`) — leituras automáticas; escrita/execução
 seguem política de permissão — até a conclusão da tarefa.
+
+Na **v5.0.0** a TUI é a **única interface**: o CLI one-shot (Click) foi removido. Consultas
+ao RAG e ao scanner continuam disponíveis como `/ask` e `/deps` dentro da TUI.
 
 Na v4.1.0 o fluxo vira de **criação do zero**: detecção de projeto vazio, atalho
 **`/bootstrap`** (pergunta stack/nome/banco e gera a base + `.sql`), **streaming**
@@ -231,7 +234,7 @@ No modo agente, o LLM responde a cada turno com `{"steps":[...]}` em vez do sche
 
 * **RNF-01 (Performance):** ✅ esqueletos em <200 ms para até 5.000 linhas (medido ~97 ms).
 * **RNF-02 (Segurança Local):** ✅ comunicação só com loopback local; RAG via subprocess na máquina.
-* **RNF-04 (Atomicidade):** ✅ falha de parse/validação ⇒ nada é escrito; **extendido ao lote multi-arquivo** (all-or-nothing) com retry de autocorreção até `--max-retries` (padrão 3).
+* **RNF-04 (Atomicidade):** ✅ falha de parse/validação ⇒ nada é escrito; **extendido ao lote multi-arquivo** (all-or-nothing). No agente (TUI), formato inválido é sinalizado e o turno segue (máx. `max_turns`, padrão 20).
 
 > RNF-03 (reconexão de extensão) migrou para o CapoeiraHost na v2.0.0 e permanece fora.
 
@@ -242,31 +245,29 @@ No modo agente, o LLM responde a cada turno com `{"steps":[...]}` em vez do sche
 ```text
 capoeira-code/
 ├── cli/                            # ✅ implementado
-│   ├── entry.py                    # entry `capoeira`: PATH abre a TUI; subcomandos → Click
-│   ├── main.py                     # Click: run | ask | refactor | generate | explain | deps | tui
-│   ├── llm_client.py               # HTTP /api/chat (Ollama-compatível, urllib; chat_messages)
-│   ├── prompts.py                  # Builders de prompt; contrato multi-arquivo e steps (agente)
+│   ├── entry.py                    # entry `capoeira`: PATH + flags → SEMPRE a TUI (única interface)
+│   ├── llm_client.py               # HTTP /api/chat (Ollama-compatível, urllib; chat_messages + stream)
+│   ├── prompts.py                  # Contratos de prompt; TOOLS_CONTRACT do agente (steps)
 │   ├── applier.py                  # Aplicador atômico multi-arquivo (stage/commit)
-│   ├── instruction/                # loader de specs/skills/prompts (+ render_project_profile)
+│   ├── instruction/                # loader de specs/skills/prompts/blueprints (+ render_project_profile)
 │   ├── project/                    # premises.py (yaml) + scanner.py (deps/tabelas)
 │   ├── rag_client.py               # subprocess -> local-rag-system
 │   ├── tui/                        # modo agente interativo
-│   │   ├── app.py                  # TUI prompt_toolkit + rich; /comandos (model, rescan, reset...)
+│   │   ├── app.py                  # TUI prompt_toolkit + rich; /comandos (ask, deps, model, reset...)
 │   │   ├── session.py              # workspace configs/<slug>/ + session.jsonl (1 sessão ativa/projeto)
-│   │   ├── scan_artifacts.py       # gera tree.txt, dependencies.json, asts/
+│   │   ├── scan_artifacts.py       # gera tree.txt, dependencies.json, asts/ (+ is_empty_project)
 │   │   ├── permissions.py          # política de permissão (leitura auto; ask/readonly/auto)
 │   │   ├── tools.py                # executores: read/list/run_shell/run_python/write_file
-│   │   └── agent.py                # loop do agente: steps → execução → até done/max_turns
+│   │   ├── agent.py                # loop do agente: steps → execução → até done/max_turns
+│   │   └── bootstrap.py            # instrução/funções do criar-do-zero (/bootstrap)
 │   └── reducers/                   # Tree-Sitter PHP/JS/Python
-├── tests/                          # ✅ 122 testes pytest
+├── tests/                          # ✅ 123 testes pytest
 │   ├── test_reducers_*.py          # PHP/JS/Python
 │   ├── test_applier.py
 │   ├── test_applier_multi.py
 │   ├── test_llm_client.py
-│   ├── test_cli.py                 # refactor/generate/explain/deps (LLM stubado)
-│   ├── test_cli_motor.py           # run/ask (LLM stubado + RAG mockado)
-│   ├── test_premises.py
-│   ├── test_scanner.py
+│   ├── test_llm_client_stream.py
+│   ├── test_entry.py               # entrada da TUI (PATH/flags/help)
 │   ├── test_rag_client.py
 │   ├── test_instruction.py
 │   ├── test_prompts.py
@@ -275,8 +276,9 @@ capoeira-code/
 │   ├── test_tools.py
 │   ├── test_permissions.py
 │   ├── test_agent.py
-│   └── test_entry.py
-├── examples/capoeira-config.template/  # modelo de config (yaml + specs/skills/prompts)
+│   ├── test_bootstrap.py
+│   └── test_tui_slash.py            # /ask e /deps da TUI
+├── examples/capoeira-config.template/  # modelo de config (yaml + specs/skills/prompts/blueprints)
 ├── specs/capoeira-code-spec.md     # este arquivo
 ├── requirements.txt                # + prompt_toolkit, rich
 ├── requirements-dev.txt
@@ -290,30 +292,28 @@ capoeira-code/
 
 ## 8. Código-Fonte e Interfaces dos Módulos Principais
 
-### 8.1. CLI (Python)
+### 8.1. Interface (única: TUI)
+> **v5.0.0**: o CLI one-shot (Click) foi **removido**. Toda a interação é pela TUI.
 
 ```
-python -m cli run "INSTRUÇÃO" [--project NOME] [--prompt FLUXO] [--skill NOME]
-       [--file ARQ]... [--context ARQ]... [--rag PERGUNTA] [--doc-type user|tech|support]
-       [--dry-run] [--max-retries N] [--base-url URL] [--model M] [--timeout SEG]
-
-python -m cli ask "PERGUNTA" [--project NOME] [--doc-type ...]
-python -m cli refactor ... | generate ... | explain ... | deps [--project NOME]
+capoeira [PATH] [--project NOME] [--readonly] [--model M] [--base-url URL] [--timeout SEG] [--help]
+python -m cli [PATH] [...]    # equivalente (entry único)
 ```
 
-* **`run`** — carrega premissas (`--project`), specs/skills/prompts; injeta contexto dos
-  `--file`/`--context` (esqueletos) e do `--rag`; envia build_run_prompt; o LLM responde
-  ação única ou lote; aplica atomicamente. `--dry-run` renderiza diff colorido + confirmação.
-* **`ask`** — chama o RAG (subprocess) e imprime a resposta/contexto.
-* **`deps --project`** — além dos imports, classifica o módulo e lista tabelas SQL tocadas.
-* `explain` mantido por compatibilidade (uso recomendado: RAG).
+* `PATH` padrão = diretório atual; qualquer token posicional vira o PATH; `-h/--help`
+  imprime o uso. Não existem subcomandos.
+* Dentro da TUI, `/`-comandos: `/help`, `/model`, `/base-url`, `/premises`, `/rescan`,
+  `/reset`, `/bootstrap`, `/max-turns N`, `/readonly`, **`/ask`**, **`/deps`**, `/quit`.
+* `run`/`refactor`/`generate`/`explain` one-shot deixaram de existir como CLI — o mesmo
+  motor é usado pelo agente (sessão/`steps`, além das ferramentas nativas).
 
 ### 8.2. Premissas (`cli/project/premises.py`)
 ```python
 class Premises(BaseModel):
     name: str; description: str = ""
     stack: StackPremises; banco: BancoPremises | None; frontend: FrontendPremises
-    rag: RagPremises | None; specs/skills/prompts: list[str] | None = None
+    rag: RagPremises | None
+    specs/skills/prompts/blueprints: list[str] | None = None
     def validate_banco(self) -> str: ...
 
 def resolve_config_dir() -> Path: ...   # env -> %APPDATA%\CapoeiraCode -> ~/.capoeira
@@ -354,7 +354,7 @@ ApplyResult: ok, message, error, payload(CapoeiraResponse|None), staged(dict|Non
 * `stage_payload` prepara tudo em memória; `commit_staged` grava (tmp + `os.replace`, criando diretórios). *Sem escrita parcial.*
 
 ### 8.6. Modo agente/TUI (`cli/tui/`)
-* **`app.py` — `run_tui(project_path, project, readonly, model, base_url, timeout)`**: PromptSession (prompt_toolkit) + Console (rich); comandos `/model`, `/base-url`, `/premises`, `/rescan`, `/reset`, `/readonly`, `/help`, `/quit`; `Ctrl+C` interrompe o agente; `Ctrl+D` sai.
+* **`app.py` — `run_tui(project_path, project, readonly, model, base_url, timeout)`**: PromptSession (prompt_toolkit) + Console (rich); comandos `/model`, `/base-url`, `/premises`, `/rescan`, `/reset`, `/bootstrap`, `/max-turns`, `/readonly`, **`/ask <pergunta> [--doc-type]`** (consulta o `local-rag-system`), **`/deps <arquivo>`** (módulo/deps/tabelas via scanner), `/help`, `/quit`; `Ctrl+C` interrompe o agente; `Ctrl+D` sai.
 * **`session.py`**: `Session(config_dir, project_path)` — workspace `configs/<slug>/`, `session.jsonl` (histórico `{role, content}`), `workspace/`, `asts/`; 1 sessão ativa por projeto (`reset()` limpa).
 * **`scan_artifacts.py`**: `generate_artifacts(session, premises)` → `{tree, num_files, ast_files, dependencies}`; persiste `tree.txt`, `dependencies.json`, `asts/<relpath>`; `artifacts_summary(result)` enxuto para o prompt.
 * **`permissions.py`**: `PermissionGate(mode)` — `read_file/list_dir` sempre; `run_shell/run_python/write_file` conforme `ask` (y/n/a com "sempre na sessão"), `readonly` (nega), `auto` (aceita).
@@ -364,8 +364,8 @@ ApplyResult: ok, message, error, payload(CapoeiraResponse|None), staged(dict|Non
 ### 8.7. Entry point (`cli/entry.py`, `pyproject.toml`)
 ```python
 def main(argv=None):  # console script `capoeira`
-    # se arg0 for subcomando conhecido ou opção ('-'), delega ao Click (cli.main:cli)
-    # senão trata arg0 como PATH do projeto e chama run_tui (flag parsing limitado)
+    # separa PATH (primeiro token posicional) das opções (--project/--readonly/--model/
+    # --base-url/--timeout/-h); SEMPRE chama run_tui — não há subcomandos
 ```
 Instalação: `pip install -e .` cria os executáveis `capoeira`/`capoeira-code`.
 
@@ -381,3 +381,4 @@ Instalação: `pip install -e .` cria os executáveis `capoeira`/`capoeira-code`
 | `3.0.0` | 08/09/2026 | **Iteração 4 (motor de instrução)**: 86 testes. Novo comando **`run`** declarativo (estilo OpenCode) — instrução livre com specs/skills/prompts em arquivos, o LLM decide as ações. **Premissas por projeto** (`projects/*.yaml` em `CAPOEIRA_CONFIG_DIR`/`%APPDATA%\CapoeiraCode`/`~/.capoeira`) com stack/banco/frontend/rag. **Scanner** de dependências e tabelas (`cli/project/scanner.py`). ****`ask`** e `--rag`** integrando o `local-rag-system` via subprocess. **Applier multi-arquivo** (formato `files:[...]` + staging all-or-nothing, extensão da RNF-04 ao lote; formato único mantido por compat). `deps --project` classifica módulo e lista tabelas. Requires +`PyYAML`. |
 | `4.0.0` | 08/09/2026 | **Iteração 5 (modo agente/TUI)**: 122 testes. `capoeira [PATH]` abre a **TUI interativa** (prompt_toolkit + rich) estilo OpenCode representando todo o fluxo da visão (item 5): workspace de sessão por projeto em `configs/<slug>/` (`session.jsonl` retomável, 1 sessão ativa + `/reset`); artefatos de scan `tree.txt`/`dependencies.json`/`asts/`; **loop de agente** com contrato de ferramentas (§5.1) — `read_file/list_dir/run_shell/run_python/write_file/ask_user/done`, aplicação `write_file` via applier, política de permissão (`readonly`/`ask`/`auto`, leitura automática, `--readonly`); `chat_messages` no `LLMClient`; entry point `capoeira` (pyproject) + subcomando `tui`; `python -m cli [PATH]` também funciona via `cli/entry.py`. Requires +`prompt_toolkit`/`rich`. |
 | `4.1.0` | 08/09/2026 | **Iteração 6 (criar do zero)**: 131 testes. **Bootstrap** na TUI — `is_empty_project` (sem código e sem manifest), comando `/bootstrap` (template `prompts/bootstrap.md` ou padrão embutido) que pergunta stack/nome/banco via `ask_user`, gera a base e `database/schema.sql` + `migrations/*.sql` (execução fica com o usuário). **Streaming** no `LLMClient.chat_messages(stream=True, on_chunk)` (NDJSON) com exibição incremental no agente. **`blueprints/`** no config (exemplos de estrutura definidos pelo usuário, seleção por `blueprints:` nas premissas) injetado no prompt do agente. UX: autocompletar de `/comandos`, `/max-turns`. Ratifica que a stack é definida pelo usuário (blueprints/.md/prompt), nunca hardcoded. |
+| `5.0.0` | 08/09/2026 | **Iteração 7 (TUI-only)**: 123 testes. **Removido o CLI one-shot** (`cli/main.py` — grupo Click e handlers `run/refactor/generate/explain/ask/deps`). `capoeira [PATH] [flags]` passa a ser a **única interface** (entrada em `cli/entry.py` parsa PATH + `--project/--readonly/--model/--base-url/--timeout/-h` e sempre chama `run_tui`). Capacidades antes só de CLI tornam-se `/comandos` da TUI: **`/ask`** (RAG via subprocess) e **`/deps`** (módulo/dependências/tabelas via scanner), com helpers `_ask_query`/`_deps_report` testáveis. Testes de CLI (test_cli/test_cli_motor) removidos; `test_entry.py` reescrito; novo `test_tui_slash.py`. Breaking: exclusive TUI. |
