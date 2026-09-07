@@ -1,139 +1,252 @@
-import asyncio
-import json
 import sys
 
 import click
 
 from .applier import ChangeApplier
+from .llm_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_TIMEOUT, LLMClient, LLMRequestError
+from .prompts import (
+    build_explain_prompt,
+    build_generate_prompt,
+    build_refactor_prompt,
+    build_retry_prompt,
+)
 from .reducers import get_reducer_for_path
-from .server import CapoeiraServer
-
-# Esquema de resposta obrigatório injetado em todo prompt (spec secao 5).
-RESPONSE_SCHEMA = {
-    "$schema": "http://json-schema.org/draft-07/schema#",
-    "type": "object",
-    "properties": {
-        "file_path": {"type": "string"},
-        "action": {"type": "string", "enum": ["replace_symbol", "create_file", "patch_diff"]},
-        "target_symbol": {"type": "string"},
-        "code_content": {"type": "string"},
-        "explanation": {"type": "string", "description": "Resumo de 1 linha da alteração"},
-    },
-    "required": ["file_path", "action", "code_content"],
-}
 
 
-def build_prompt(file_path: str, symbol: str, instruction: str, skeleton: str) -> str:
-    schema_text = json.dumps(RESPONSE_SCHEMA, indent=2, ensure_ascii=False)
-    return f"""INSTRUÇÃO: {instruction}
-SÍMBOLO ALVO: {symbol}
-CAMINHO DO ARQUIVO: {file_path}
-
-ESQUELETO DO CÓDIGO DO PROJETO:
-{skeleton}
-
-Responda APENAS com um JSON válido que siga estritamente este esquema:
-{schema_text}
-
-Use action "replace_symbol" com target_symbol "{symbol}" e coloque em "code_content"
-o código completo e atualizado da definição do símbolo alvo (e apenas dele).
-"""
-
-
-def build_retry_prompt(original_prompt: str, error: str) -> str:
-    return f"""A resposta anterior não pôde ser aplicada: {error}
-
-Responda APENAS com o JSON corrigido, sem nenhum texto adicional.
-
----
-{original_prompt}
-"""
+def llm_options(func):
+    """Opções compartilhadas de comunicação com o backend compatível com Ollama."""
+    func = click.option(
+        "--base-url",
+        default=DEFAULT_BASE_URL,
+        show_default=True,
+        help="Base URL do backend compatível com Ollama (Ollama ou CapoeiraHost)",
+    )(func)
+    func = click.option(
+        "--model",
+        default=DEFAULT_MODEL,
+        show_default=True,
+        help="Perfil/modelo registrado no backend (ex.: gemini-pro, qwen2.5-coder)",
+    )(func)
+    func = click.option(
+        "--timeout",
+        default=DEFAULT_TIMEOUT,
+        show_default=True,
+        help="Timeout (s) por chamada ao backend",
+    )(func)
+    return func
 
 
-async def run_refactor(
+def _read_code(file_path: str) -> str:
+    with open(file_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _extract_skeleton(file_path: str, symbol: str | None) -> str:
+    reducer = get_reducer_for_path(file_path)
+    return reducer.extract_skeleton(_read_code(file_path), target_symbol=symbol or "")
+
+
+def run_refactor(
     file_path: str,
     symbol: str,
     instruction: str,
-    provider: str,
+    base_url: str,
+    model: str,
     timeout: float,
     max_retries: int,
 ) -> bool:
-    with open(file_path, "r", encoding="utf-8") as f:
-        code = f.read()
-
     try:
-        reducer = get_reducer_for_path(file_path)
+        skeleton = _extract_skeleton(file_path, symbol)
     except ValueError as e:
         click.echo(click.style(str(e), fg="red"), err=True)
         return False
 
-    skeleton = reducer.extract_skeleton(code, target_symbol=symbol)
-    prompt = build_prompt(file_path, symbol, instruction, skeleton)
+    prompt = build_refactor_prompt(file_path, symbol, instruction, skeleton)
+    client = LLMClient(base_url=base_url, model=model, timeout=timeout)
 
-    server = CapoeiraServer()
-    async with await server.start():
-        click.echo(f"[CapoeiraCode] Bridge WebSocket em ws://{server.host}:{server.port}")
-        click.echo("Aguardando a extensão conectar (abra a aba do LLM no navegador)...")
+    current_prompt = prompt
+    for attempt in range(1, max_retries + 1):
         try:
-            await server.wait_for_extension()
-        except KeyboardInterrupt:
+            raw_response = client.chat(current_prompt)
+        except LLMRequestError as e:
+            click.echo(click.style(str(e), fg="red"), err=True)
             return False
 
-        current_prompt = prompt
-        for attempt in range(1, max_retries + 1):
-            try:
-                raw_response = await server.send_prompt_and_wait(
-                    current_prompt, provider=provider, timeout=timeout
-                )
-            except (ConnectionError, TimeoutError) as e:
-                click.echo(click.style(str(e), fg="red"), err=True)
-                return False
+        result = ChangeApplier.apply_payload(raw_response)
+        if result.ok:
+            click.echo(click.style(f"Refatoração concluída! {result.message}", fg="green"))
+            return True
 
-            result = ChangeApplier.apply_payload(raw_response)
-            if result.ok:
-                click.echo(click.style(f"Refatoração concluída! {result.message}", fg="green"))
-                return True
-
-            click.echo(
-                click.style(f"[Tentativa {attempt}/{max_retries}] {result.error}", fg="yellow"),
-                err=True,
-            )
-            # RNF-04: nada foi modificado; pede autocorreção ao LLM.
-            current_prompt = build_retry_prompt(prompt, result.error)
+        click.echo(
+            click.style(f"[Tentativa {attempt}/{max_retries}] {result.error}", fg="yellow"),
+            err=True,
+        )
+        # RNF-04: nada foi modificado; pede autocorreção ao LLM.
+        current_prompt = build_retry_prompt(prompt, result.error)
 
     click.echo(click.style("Falha ao aplicar alterações após todas as tentativas.", fg="red"), err=True)
     return False
 
 
+def run_generate(
+    file_path: str,
+    instruction: str,
+    symbol: str | None,
+    context_file: str | None,
+    base_url: str,
+    model: str,
+    timeout: float,
+    max_retries: int,
+) -> bool:
+    context = None
+    if context_file:
+        try:
+            context = _extract_skeleton(context_file, symbol)
+        except ValueError as e:
+            click.echo(click.style(f"Contexto inválido: {e}", fg="red"), err=True)
+            return False
+
+    if symbol and not context_file:
+        try:
+            get_reducer_for_path(file_path)
+        except ValueError as e:
+            click.echo(click.style(f"{e} (desejava criar um novo arquivo? omita --symbol)", fg="red"), err=True)
+            return False
+
+    prompt = build_generate_prompt(file_path, instruction, symbol, context)
+    client = LLMClient(base_url=base_url, model=model, timeout=timeout)
+
+    current_prompt = prompt
+    for attempt in range(1, max_retries + 1):
+        try:
+            raw_response = client.chat(current_prompt)
+        except LLMRequestError as e:
+            click.echo(click.style(str(e), fg="red"), err=True)
+            return False
+
+        result = ChangeApplier.apply_payload(raw_response, expected_file_path=file_path)
+        if result.ok:
+            click.echo(click.style(f"Artefato gerado! {result.message}", fg="green"))
+            return True
+
+        click.echo(
+            click.style(f"[Tentativa {attempt}/{max_retries}] {result.error}", fg="yellow"),
+            err=True,
+        )
+        current_prompt = build_retry_prompt(prompt, result.error)
+
+    click.echo(click.style("Falha ao gerar o artefato após todas as tentativas.", fg="red"), err=True)
+    return False
+
+
+def run_explain(file_path: str, symbol: str | None, base_url: str, model: str, timeout: float) -> bool:
+    try:
+        skeleton = _extract_skeleton(file_path, symbol)
+    except ValueError as e:
+        click.echo(click.style(str(e), fg="red"), err=True)
+        return False
+
+    prompt = build_explain_prompt(file_path, symbol, skeleton)
+    client = LLMClient(base_url=base_url, model=model, timeout=timeout)
+    try:
+        explanation = client.chat(prompt)
+    except LLMRequestError as e:
+        click.echo(click.style(str(e), fg="red"), err=True)
+        return False
+
+    click.echo(explanation.strip())
+    return True
+
+
+def run_deps(file_path: str) -> bool:
+    try:
+        reducer = get_reducer_for_path(file_path)
+        deps = reducer.extract_dependencies(_read_code(file_path))
+    except ValueError as e:
+        click.echo(click.style(str(e), fg="red"), err=True)
+        return False
+
+    if not deps:
+        click.echo("Nenhuma dependência detectada.")
+        return True
+    click.echo("Dependências do arquivo:")
+    for dep in deps:
+        click.echo(f"  - {dep}")
+    return True
+
+
 @click.group()
 def cli():
-    """CapoeiraCode CLI - Agente para desenvolvimento e refatoração em sistemas legados."""
+    """CapoeiraCode CLI - Agente para desenvolvimento e refatoração em sistemas legados.
+
+    Usa o modelo via backend compatível com a API do Ollama (Ollama nativo ou
+    CapoeiraHost), desacoplando o CLI de navegador/extensão.
+    """
 
 
 @cli.command()
 @click.option("--file", "file_path", required=True, help="Caminho do arquivo legado")
 @click.option("--symbol", required=True, help="Nome do método/função alvo")
 @click.option("--instruction", required=True, help="O que deve ser alterado/refatorado")
-@click.option(
-    "--provider",
-    default="gemini",
-    show_default=True,
-    type=click.Choice(["gemini", "claude", "chatgpt", "copilot"]),
-    help="Plataforma Web de LLM alvo",
-)
-@click.option("--timeout", default=180.0, show_default=True, help="Timeout (s) por resposta do LLM")
 @click.option("--max-retries", default=3, show_default=True, help="Tentativas de autocorreção (RNF-04)")
-def refactor(file_path: str, symbol: str, instruction: str, provider: str, timeout: float, max_retries: int):
+@llm_options
+def refactor(file_path, symbol, instruction, base_url, model, timeout, max_retries):
     """Reduz o contexto do arquivo via AST e solicita a alteração ao LLM."""
     try:
-        success = asyncio.run(
-            run_refactor(file_path, symbol, instruction, provider, timeout, max_retries)
-        )
+        success = run_refactor(file_path, symbol, instruction, base_url, model, timeout, max_retries)
     except FileNotFoundError:
         click.echo(click.style(f"Arquivo não encontrado: {file_path}", fg="red"), err=True)
         success = False
     except KeyboardInterrupt:
         click.echo("\nOperação cancelada pelo usuário.")
+        success = False
+    sys.exit(0 if success else 1)
+
+
+@cli.command()
+@click.option("--file", "file_path", required=True, help="Caminho do artefato a criar/gerar")
+@click.option("--instruction", required=True, help="O que deve ser criado (ex.: testes, esqueleto, docs)")
+@click.option("--symbol", default=None, help="Se informado, substitui um símbolo existente em vez de criar arquivo")
+@click.option("--context", "context_file", default=None, help="Arquivo relacionado cujo esqueleto entra no prompt")
+@click.option("--max-retries", default=3, show_default=True, help="Tentativas de autocorreção (RNF-04)")
+@llm_options
+def generate(file_path, instruction, symbol, context_file, base_url, model, timeout, max_retries):
+    """Cria artefatos para auxiliar a codificação (testes, esqueleto de módulo, scaffolding, docs)."""
+    try:
+        success = run_generate(
+            file_path, instruction, symbol, context_file, base_url, model, timeout, max_retries
+        )
+    except KeyboardInterrupt:
+        click.echo("\nOperação cancelada pelo usuário.")
+        success = False
+    sys.exit(0 if success else 1)
+
+
+@cli.command()
+@click.option("--file", "file_path", required=True, help="Caminho do arquivo legado")
+@click.option("--symbol", default=None, help="Limita a explicação a um símbolo específico")
+@llm_options
+def explain(file_path, symbol, base_url, model, timeout):
+    """Explica o esqueleto de um arquivo/símbolo via LLM (somente leitura)."""
+    try:
+        success = run_explain(file_path, symbol, base_url, model, timeout)
+    except FileNotFoundError:
+        click.echo(click.style(f"Arquivo não encontrado: {file_path}", fg="red"), err=True)
+        success = False
+    except KeyboardInterrupt:
+        click.echo("\nOperação cancelada pelo usuário.")
+        success = False
+    sys.exit(0 if success else 1)
+
+
+@cli.command()
+@click.option("--file", "file_path", required=True, help="Caminho do arquivo")
+def deps(file_path):
+    """Lista dependências (imports/requires) do arquivo - sem LLM."""
+    try:
+        success = run_deps(file_path)
+    except FileNotFoundError:
+        click.echo(click.style(f"Arquivo não encontrado: {file_path}", fg="red"), err=True)
         success = False
     sys.exit(0 if success else 1)
 

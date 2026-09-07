@@ -35,11 +35,20 @@ class ChangeApplier:
     """
 
     @staticmethod
-    def apply_payload(raw_json_str: str) -> ApplyResult:
+    def apply_payload(raw_json_str: str, expected_file_path: str | None = None) -> ApplyResult:
         try:
             payload = ChangeApplier._parse_payload(raw_json_str)
         except ValueError as e:
             return ApplyResult(ok=False, error=str(e))
+
+        if expected_file_path is not None and payload.file_path != expected_file_path:
+            return ApplyResult(
+                ok=False,
+                error=(
+                    f"Caminho inesperado na resposta ({payload.file_path!r}); "
+                    f"nada foi escrito. Esperado: {expected_file_path}"
+                ),
+            )
 
         try:
             if payload.action == "create_file":
