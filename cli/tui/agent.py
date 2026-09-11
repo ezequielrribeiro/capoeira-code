@@ -4,9 +4,9 @@ import json
 import re
 from dataclasses import dataclass
 
-from ..llm_client import LLMRequestError
-from ..prompts import build_agent_system_prompt
+from ..llm_client import ChatReply, LLMRequestError
 from ..instruction.loader import render_project_profile
+from ..prompts import TOOLS_DECLARATION, build_agent_system_prompt
 from .permissions import PermissionGate
 from .session import Session
 from .tools import apply_step
@@ -63,10 +63,15 @@ class AgentRun:
         history = self.messages[-MAX_CONTEXT_MESSAGES:]
         return [{"role": "system", "content": self._system_prompt()}] + history
 
-    def _chat_once(self) -> str:
+    def _chat_once(self) -> "ChatReply":
         msgs = self._build_prompt_messages()
         streaming = self.options.on_chunk is not None
-        return self.client.chat_messages(msgs, stream=streaming, on_chunk=self.options.on_chunk)
+        return self.client.chat_messages(
+            msgs,
+            stream=streaming,
+            on_chunk=self.options.on_chunk,
+            tools=TOOLS_DECLARATION,
+        )
 
     # ------------------------------------------------------------------
     # Registro
@@ -74,6 +79,10 @@ class AgentRun:
     def _add(self, role: str, content: str) -> None:
         self.messages.append({"role": role, "content": content})
         self.session.record(role, content)
+
+    def _add_tool(self, name: str, content: str) -> None:
+        self.messages.append({"role": "tool", "tool_name": name, "content": content})
+        self.session.record("tool", content, tool_name=name)
 
     # ------------------------------------------------------------------
     # Execução do turno
@@ -84,43 +93,73 @@ class AgentRun:
 
         for turn in range(1, opts.max_turns + 1):
             try:
-                raw = self._chat_once()
+                reply = self._chat_once()
             except LLMRequestError as e:
                 self._add("user", f"[sistema] Erro de comunicação com o backend: {e}")
                 return {"done": False, "message": str(e)}
 
-            self._add("assistant", raw)
+            if reply.has_tool_calls:
+                calls = reply.tool_calls or []
+                if reply.content:
+                    self._add("assistant", reply.content)
+                else:
+                    self.messages.append({"role": "assistant", "tool_calls": [c["name"] for c in calls]})
+                    self.session.record(
+                        "assistant",
+                        json.dumps([(c.get("name"), c.get("arguments")) for c in calls], ensure_ascii=False),
+                    )
+                for call in calls:
+                    step = _tool_call_to_step(call)
+                    ended = self._run_step(step, ask_user, ask_permission, native=True)
+                    if ended is not None:
+                        return ended
+                continue
+
+            raw = reply.content
+            if not raw:
+                self._add("user", INVALID_FORMAT_NOTE)
+                continue
             steps = _parse_steps(raw)
             if steps is None:
                 self._add("user", INVALID_FORMAT_NOTE)
                 continue
 
             for step in steps:
-                tool = step.get("tool", "")
-                if tool == "done":
-                    message = step.get("message", "")
-                    self._add("user", f"[sistema] Turno encerrado. {message}".strip())
-                    return {"done": True, "message": message}
-
-                if tool == "ask_user":
-                    question = step.get("question", "?")
-                    answer = ask_user(question)
-                    self._add("user", f"[RESPOSTA DO USUÁRIO]\n{answer}")
-                    continue
-
-                description = _describe(step)
-                if not self.gate.allow(tool, description, ask_permission):
-                    self._add("user", f"[FERRAMENTA NÃO AUTORIZADA] {tool}: {description}")
-                    continue
-
-                result = apply_step(step, opts.cwd, python=opts.python, timeout=opts.timeout)
-                self._add(
-                    "user",
-                    f"[FERRAMENTA {tool}] {description}\n{result.output if result.ok else f'ERRO: {result.output}'}",
-                )
+                ended = self._run_step(step, ask_user, ask_permission)
+                if ended is not None:
+                    return ended
 
         self._add("user", "[sistema] Limite de turnos atingido sem 'done'. Encerrado.")
         return {"done": False, "message": f"Limite de {opts.max_turns} turnos atingido."}
+
+    def _run_step(self, step: dict, ask_user, ask_permission, native: bool = False):
+        """Executa um passo (steps simulado ou tool_call nativo). Retorna dict se
+        o turno encerrou, senão None. Com `native=True` o resultado vira mensagem
+        `role:"tool"` (formato Ollama); no modo simulado permanece `role:"user"`."""
+        tool = step.get("tool", "")
+        if tool == "done":
+            message = step.get("message", "")
+            self._add("user", f"[sistema] Turno encerrado. {message}".strip())
+            return {"done": True, "message": message}
+
+        if tool == "ask_user":
+            question = step.get("question", "?")
+            answer = ask_user(question)
+            self._add("user", f"[RESPOSTA DO USUÁRIO]\n{answer}")
+            return None
+
+        description = _describe(step)
+        if not self.gate.allow(tool, description, ask_permission):
+            self._add("user", f"[FERRAMENTA NÃO AUTORIZADA] {tool}: {description}")
+            return None
+
+        result = apply_step(step, self.options.cwd, python=self.options.python, timeout=self.options.timeout)
+        output = f"[FERRAMENTA {tool}] {description}\n{result.output if result.ok else f'ERRO: {result.output}'}"
+        if native:
+            self._add_tool(tool, output)
+        else:
+            self._add("user", output)
+        return None
 
 
 def _parse_steps(raw: str) -> list[dict] | None:
@@ -152,3 +191,34 @@ def _describe(step: dict) -> str:
     path = step.get("path") or step.get("cmd") or step.get("question") or ""
     action = f" [{step['action']}]" if step.get("action") else ""
     return f"{tool}{action} {path}".strip()
+
+
+def _tool_call_to_step(call: dict) -> dict:
+    """Converte um tool_call nativo `{name, arguments}` no formato `{tool, ...}`."""
+    name = _normalize_tool_name(call.get("name", ""))
+    arguments = call.get("arguments") or {}
+    step = {"tool": name}
+    step.update({k: v for k, v in arguments.items() if v is not None})
+    return step
+
+
+def _normalize_tool_name(name: str) -> str:
+    """Ajusta variações de nome do backend para os nomes internos das ferramentas."""
+    mapping = {
+        "list_dir": "list_dir",
+        "list_directory": "list_dir",
+        "read_file": "read_file",
+        "read": "read_file",
+        "run_shell": "run_shell",
+        "run_command": "run_shell",
+        "shell": "run_shell",
+        "run_python": "run_python",
+        "python": "run_python",
+        "write_file": "write_file",
+        "write": "write_file",
+        "create_file": "write_file",
+        "ask_user": "ask_user",
+        "ask": "ask_user",
+        "done": "done",
+    }
+    return mapping.get(name, name)

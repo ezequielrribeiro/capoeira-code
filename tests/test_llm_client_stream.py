@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from cli.llm_client import LLMClient, LLMRequestError
+from cli.llm_client import LLMClient, LLMRequestError, ChatReply
 
 
 class StreamHandler(http.server.BaseHTTPRequestHandler):
@@ -24,6 +24,23 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
             chunk(" mundo")
             chunk("!")
             lines.append(json.dumps({"done": True}))
+            user_content = (body.get("messages") or [{}])[-1].get("content", "")
+            if user_content == "quero tool_calls":
+                lines.pop()
+                lines.append(
+                    json.dumps(
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "olá",
+                                "tool_calls": [
+                                    {"function": {"name": "done", "arguments": {"message": "fim"}}}
+                                ],
+                            },
+                            "done": True,
+                        }
+                    )
+                )
         else:
             lines.append(
                 json.dumps({"message": {"role": "assistant", "content": "nao-stream"}, "done": True})
@@ -63,18 +80,28 @@ def test_chat_stream_acumula_e_chama_on_chunk(stream_server):
         chunks.append(part)
 
     out = client.chat_messages([{"role": "user", "content": "oi"}], stream=True, on_chunk=on_chunk)
-    assert out == "ola mundo!"
+    assert out == ChatReply(content="ola mundo!")
     assert chunks == ["ola", " mundo", "!"]
     assert stream_server.last_body["stream"] is True
+
+
+def test_chat_stream_captura_tool_calls_no_chunk_final(stream_server):
+    client = _client(stream_server)
+    out = client.chat_messages(
+        [{"role": "user", "content": "quero tool_calls"}], stream=True, tools=[{"type": "function"}]
+    )
+    assert out.content == "ola mundo!olá"
+    assert out.tool_calls == [{"name": "done", "arguments": {"message": "fim"}}]
+    assert stream_server.last_body["tools"] == [{"type": "function"}]
 
 
 def test_chat_stream_sem_on_chunk_retorna_conteudo(stream_server):
     client = _client(stream_server)
     out = client.chat_messages([{"role": "user", "content": "oi"}], stream=True)
-    assert out == "ola mundo!"
+    assert out == ChatReply(content="ola mundo!")
 
 
 def test_chat_nao_stream_mantem_comportamento(stream_server):
     client = _client(stream_server)
     out = client.chat_messages([{"role": "user", "content": "oi"}])  # padrão: não-stream
-    assert out == "nao-stream"
+    assert out == ChatReply(content="nao-stream")

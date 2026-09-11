@@ -1,8 +1,9 @@
 import json
 
 from cli.instruction.loader import InstructionSet
+from cli.llm_client import ChatReply
 from cli.project.premises import EMPTY_PREMISES, Premises
-from cli.tui.agent import AgentOptions, AgentRun, _parse_steps
+from cli.tui.agent import AgentOptions, AgentRun, _parse_steps, _tool_call_to_step
 from cli.tui.session import Session
 
 
@@ -11,7 +12,10 @@ class FakeClient:
         self.responses = list(responses)
 
     def chat_messages(self, messages, **kwargs):
-        return self.responses.pop(0)
+        raw = self.responses.pop(0)
+        if isinstance(raw, ChatReply):
+            return raw
+        return ChatReply(content=raw)
 
 
 def _agent(tmp_path, responses, mode="auto", max_turns=5, cwd=None):
@@ -133,3 +137,60 @@ def test_run_formato_invalido_reformatado(tmp_path):
     result = agent.run("tarefa", ask_user=lambda q: "?", ask_permission=_yes)
     assert result["done"] is True
     assert result["message"] == "corrigido"
+
+
+def _tool_call(name, arguments):
+    return ChatReply(tool_calls=[{"name": name, "arguments": arguments}])
+
+
+def test_tool_call_nativo_executa_write_file(tmp_path):
+    alvo = tmp_path / "app" / "nativo.php"
+    agent = _agent(
+        tmp_path,
+        [
+            _tool_call(
+                "write_file",
+                {"path": "nativo.php", "action": "create_file", "code_content": "ok"},
+            ),
+            _steps([{"tool": "done", "message": "Criado via tool call."}]),
+        ],
+    )
+    result = agent.run("crie um arquivo", ask_user=lambda q: "?", ask_permission=_yes)
+    assert result["done"] is True
+    assert result["message"] == "Criado via tool call."
+    assert alvo.exists()
+    assert alvo.read_text(encoding="utf-8") == "ok"
+    records = [m for m in agent.session.load_messages() if m["role"] == "tool"]
+    assert records and records[0]["tool_name"] == "write_file"
+
+
+def test_tool_call_nativo_done_encerra(tmp_path):
+    agent = _agent(tmp_path, [_tool_call("done", {"message": "fim nativo"})])
+    result = agent.run("finalize", ask_user=lambda q: "?", ask_permission=_yes)
+    assert result["done"] is True
+    assert result["message"] == "fim nativo"
+
+
+def test_tool_call_nativo_readonly_bloqueia(tmp_path):
+    alvo = tmp_path / "app" / "bloqueado_nativo.php"
+    agent = _agent(
+        tmp_path,
+        [
+            _tool_call(
+                "write_file",
+                {"path": "bloqueado_nativo.php", "action": "create_file", "code_content": "x"},
+            ),
+            _steps([{"tool": "done", "message": "fim"}]),
+        ],
+        mode="readonly",
+    )
+    result = agent.run("escreva", ask_user=lambda q: "?", ask_permission=_yes)
+    assert not alvo.exists()
+    contents = [m["content"] for m in agent.session.load_messages()]
+    assert any("NÃO AUTORIZADA" in c for c in contents)
+
+
+def test_tool_call_to_step_normaliza_nome_e_args():
+    step = _tool_call_to_step({"name": "write", "arguments": {"path": "a.php", "action": "create_file"}})
+    assert step["tool"] == "write_file"
+    assert step["path"] == "a.php"

@@ -94,3 +94,55 @@ def test_conexao_recusada():
     with pytest.raises(LLMRequestError) as exc_info:
         client.chat("oi")
     assert "Não foi possível conectar" in str(exc_info.value)
+
+
+def test_chat_messages_ler_tool_calls_nativos(stub_server):
+    client, handler = _client(stub_server)
+    handler.response_body = json.dumps(
+        {
+            "model": "x",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "write_file", "arguments": {"path": "a.php", "action": "create_file"}}},
+                    {"function": {"name": "done", "arguments": {"message": "fim"}}},
+                ],
+            },
+            "done": True,
+        }
+    )
+    reply = client.chat_messages([{"role": "user", "content": "crie"}])
+    assert reply.content == ""
+    assert reply.has_tool_calls is True
+    assert reply.tool_calls == [
+        {"name": "write_file", "arguments": {"path": "a.php", "action": "create_file"}},
+        {"name": "done", "arguments": {"message": "fim"}},
+    ]
+
+
+def test_chat_messages_tool_calls_formato_direto(stub_server):
+    client, handler = _client(stub_server)
+    handler.response_body = json.dumps(
+        {
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{"name": "done", "arguments": {"message": "ok"}}],
+            }
+        }
+    )
+    reply = client.chat_messages([{"role": "user", "content": "x"}])
+    assert reply.tool_calls == [{"name": "done", "arguments": {"message": "ok"}}]
+
+
+def test_chat_messages_envia_tools_no_body(stub_server):
+    client, handler = _client(stub_server)
+    tools = [{"type": "function", "function": {"name": "done"}}]
+    client.chat_messages([{"role": "user", "content": "oi"}], tools=tools)
+    assert stub_server.last_request["tools"] == tools
+
+
+def test_chat_messages_sem_tools_nao_envia_campo(stub_server):
+    client, handler = _client(stub_server)
+    client.chat_messages([{"role": "user", "content": "oi"}])
+    assert "tools" not in stub_server.last_request

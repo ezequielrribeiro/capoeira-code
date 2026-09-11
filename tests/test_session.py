@@ -35,6 +35,16 @@ def test_session_record_e_load(tmp_path):
     assert s.has_history is True
 
 
+def test_session_record_tool_roundtrip(tmp_path):
+    s = Session(config_dir=tmp_path, project_path=str(tmp_path / "app"))
+    s.ensure()
+    s.record("tool", "[FERRAMENTA write_file] ...", tool_name="write_file")
+    msgs = s.load_messages()
+    assert msgs[0]["role"] == "tool"
+    assert msgs[0]["tool_name"] == "write_file"
+    assert "[FERRAMENTA write_file]" in msgs[0]["content"]
+
+
 def test_session_reset_limpa_historico(tmp_path):
     s = Session(config_dir=tmp_path, project_path=str(tmp_path / "app"))
     s.ensure()

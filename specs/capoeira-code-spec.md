@@ -155,11 +155,19 @@ class BaseLanguageReducer(ABC):
 }
 ```
 * `base_url` padrão `http://127.0.0.1:8765` (CapoeiraHost); Ollama nativo `http://127.0.0.1:11434`.
+* No modo agente, a requisição também pode levar `tools` (declaração de ferramentas
+  `read_file|list_dir|run_shell|run_python|write_file|ask_user|done` no formato Ollama
+  `{"type":"function","function":{name, description, parameters}}`) para modelos com
+  tool-calling nativo — `cli/prompts.py::TOOLS_DECLARATION`.
 
 ### 4.2. Resposta
 ```json
 { "model": "gemini-pro", "message": { "role": "assistant", "content": "{ ... }" }, "done": true }
 ```
+O cliente devolve um `ChatReply` (`cli/llm_client.py`): `content` (texto livre) **e/ou**
+`tool_calls` normalizados como `[{"name", "arguments"}]`. Aceita tanto o formato nativo
+`{"function": {"name", "arguments"}}` quanto `{"name", "arguments"}` direto. A resposta é
+considerada vazia (erro `LLMRequestError`) somente se não houver `content` **nem** `tool_calls`.
 ### 4.3. Tempo de espera e streaming
 `--timeout` (padrão 180 s); rede timeout ou back-end exceder o prazo levantam `LLMRequestError` → exit 1.
 No modo agente, `chat_messages(..., stream=True, on_chunk)` usa `stream:true` (NDJSON linha a
@@ -202,7 +210,19 @@ Todo prompt de mutação injeta o contrato de resposta. Duas formas aceitas:
 
 ### 5.1. Contrato de ferramentas do modo agente (TUI, v4.0.0)
 
-No modo agente, o LLM responde a cada turno com `{"steps":[...]}` em vez do schema acima:
+No modo agente o motor aceita **duas formas** de pedir a execução de ferramentas:
+
+**A) Tool-calling nativo (v5.1.0, preferencial):** o backend responde com
+`message.tool_calls`. O agente converte cada chamada em um passo equivalente do contrato
+abaixo (`_tool_call_to_step` em `cli/tui/agent.py`, com normalização de nomes), executa
+localmente via `apply_step` e devolve o resultado como mensagem `{"role":"tool",
+"tool_name": <nome>, "content": ...}` — mantendo a ida-e-volta nativa com o modelo até ele
+emitir `done`. A execução é a mesma (multiplataforma, `os.path`/`subprocess`):
+`read_file`/`list_dir` automáticas, `run_shell`/`run_python` com timeout e truncamento,
+`write_file` via `ChangeApplier` (atômico + multi-arquivo).
+
+**B) Tool-calling simulado (fallback):** o LLM responde a cada turno com `{"steps":[...]}`
+em `message.content`:
 
 ```json
 {

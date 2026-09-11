@@ -56,14 +56,16 @@ class Session:
     # ------------------------------------------------------------------
     # Histórico da conversa (jsonl: {role, content, ts})
     # ------------------------------------------------------------------
-    def record(self, role: str, content: str) -> None:
+    def record(self, role: str, content: str, tool_name: str | None = None) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         entry = {"role": role, "content": content, "ts": None}
+        if tool_name is not None:
+            entry["tool_name"] = tool_name
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def load_messages(self) -> list[dict]:
-        """Mensagens persistidas na ordem: [{'role': 'user'|'assistant', 'content': ...}]."""
+        """Mensagens persistidas na ordem: role user|assistant|tool."""
         if not self.history_file.is_file():
             return []
         messages = []
@@ -76,8 +78,11 @@ class Session:
                     data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if data.get("role") in ("user", "assistant"):
-                    messages.append({"role": data["role"], "content": data["content"]})
+                if data.get("role") in ("user", "assistant", "tool"):
+                    msg = {"role": data["role"], "content": data["content"]}
+                    if data.get("tool_name"):
+                        msg["tool_name"] = data["tool_name"]
+                    messages.append(msg)
         return messages
 
     @property

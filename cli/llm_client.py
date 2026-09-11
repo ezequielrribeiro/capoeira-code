@@ -1,4 +1,6 @@
 import json
+from dataclasses import dataclass
+from typing import Optional
 import urllib.error
 import urllib.request
 
@@ -7,6 +9,41 @@ DEFAULT_MODEL = "gemini-pro"
 DEFAULT_TIMEOUT = 180.0
 
 SYSTEM_PROMPT = "Você é o motor CapoeiraCode. Responda APENAS em formato JSON válido."
+
+
+@dataclass
+class ChatReply:
+    """Resposta do backend: texto livre e/ou chamadas de ferramenta (tool_calls)."""
+
+    content: str = ""
+    tool_calls: Optional[list[dict]] = None
+
+    @property
+    def has_tool_calls(self) -> bool:
+        return bool(self.tool_calls)
+
+
+def _extract_tool_calls(message: dict) -> Optional[list[dict]]:
+    """Normaliza `message.tool_calls` do Ollama para [{name, arguments}].
+
+    Ollama usa `{"function": {"name": ..., "arguments": {}}}`; alguns gateways
+    já entregam `{"name": ..., "arguments": {}}`. Aceita ambos.
+    """
+    raw = message.get("tool_calls")
+    if not raw:
+        return None
+    out = []
+    for call in raw:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") or call
+        name = fn.get("name") if isinstance(fn, dict) else None
+        arguments = fn.get("arguments") if isinstance(fn, dict) else None
+        if not name:
+            continue
+        args = arguments if isinstance(arguments, dict) else {}
+        out.append({"name": name, "arguments": args})
+    return out or None
 
 
 class LLMClient:
@@ -38,24 +75,29 @@ class LLMClient:
                 {"role": "user", "content": prompt},
             ],
         }
-        return self.chat_messages(body["messages"])
+        return self.chat_messages(body["messages"]).content
 
     def chat_messages(
         self,
         messages: list[dict],
         stream: bool = False,
         on_chunk=None,
-    ) -> str:
-        """Envia uma conversa (roles system/user/assistant) e retorna a resposta.
+        tools=None,
+    ) -> ChatReply:
+        """Envia uma conversa e retorna um `ChatReply` (texto + tool_calls).
 
-        Com `stream=True` (NDJSON do Ollama), lê as respostas incrementalmente,
-        acumula `message.content` e chama `on_chunk(texto)` para cada fragmento.
+        Com `stream=True` (NDJSON do Ollama), lê respostas incrementalmente,
+        acumula `message.content`, chama `on_chunk(texto)` por fragmento e, no
+        chunk final (`done:true`), captura `message.tool_calls`. Opcionalmente
+        envia `tools` (declaração das ferramentas) para modelos com tool calling.
         """
         body = {
             "model": self.model,
             "stream": bool(stream),
             "messages": messages,
         }
+        if tools is not None:
+            body["tools"] = tools
         request = urllib.request.Request(
             f"{self.base_url}/api/chat",
             data=json.dumps(body).encode("utf8"),
@@ -80,14 +122,16 @@ class LLMClient:
 
         message = data.get("message") or {}
         content = message.get("content") or ""
-        if not content:
+        tool_calls = _extract_tool_calls(message)
+        if not content and tool_calls is None:
             raise LLMRequestError("O backend retornou uma resposta sem conteúdo.")
-        return content
+        return ChatReply(content=content, tool_calls=tool_calls)
 
     @staticmethod
-    def _read_stream(resp, on_chunk) -> str:
-        """Lê a resposta streaming (uma linha JSON NDJSON por chunk) e acumula."""
+    def _read_stream(resp, on_chunk) -> ChatReply:
+        """Lê a resposta streaming (NDJSON) e acumula content/tool_calls."""
         parts: list[str] = []
+        tool_calls: Optional[list[dict]] = None
         for raw_line in resp:
             line = raw_line.decode("utf8", errors="replace").strip()
             if not line:
@@ -96,12 +140,16 @@ class LLMClient:
                 data = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            content = ((data.get("message") or {}).get("content")) or ""
+            message = data.get("message") or {}
+            content = message.get("content") or ""
             if content:
                 parts.append(content)
                 if on_chunk is not None:
                     on_chunk(content)
-        return "".join(parts)
+            calls = _extract_tool_calls(message)
+            if calls is not None:
+                tool_calls = calls
+        return ChatReply(content="".join(parts), tool_calls=tool_calls)
 
     @staticmethod
     def _http_error_message(error: urllib.error.HTTPError) -> str:

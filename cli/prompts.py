@@ -135,7 +135,9 @@ def build_run_prompt(
 # ---------------------------------------------------------------------------
 TOOLS_CONTRACT = """Você é o motor CapoeiraCode em MODO AGENTE interativo de desenvolvimento.
 
-Para cada turno, responda SEMPRE com um único JSON contendo uma lista de passos:
+Você dispõe de ferramentas (tool calling nativo, quando o backend oferecer) OU pode
+responder com um JSON de passos. Prefira o tool calling nativo se o backend o suportar;
+caso contrário, para cada turno responda SEMPRE com um único JSON contendo uma lista de passos:
 
 {
   "steps": [
@@ -170,6 +172,103 @@ Regras:
 - Se precisar da mesma informação repetidamente, não a re-leia: use o contexto da última
   resposta da ferramenta.
 - Sempre finalize o turno com um passo "done" quando a tarefa estiver concluída."""
+
+
+TOOLS_DECLARATION = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Lê um arquivo do projeto (opcionalmente um intervalo de linhas 1-based).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Caminho relativo ou absoluto do arquivo."},
+                    "lines": {"type": "array", "items": {"type": "integer"}, "description": "[inicio, fim] 1-based."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "description": "Lista um diretório do projeto.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Diretório a listar."}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_shell",
+            "description": "Executa um comando shell no diretório do projeto (ex.: lint, testes, git).",
+            "parameters": {
+                "type": "object",
+                "properties": {"cmd": {"type": "string", "description": "Comando shell a executar."}},
+                "required": ["cmd"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_python",
+            "description": "Executa trechos de Python no diretório do projeto (ex.: inspecionar schema).",
+            "parameters": {
+                "type": "object",
+                "properties": {"code": {"type": "string", "description": "Código Python a executar."}},
+                "required": ["code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Modifica o projeto de forma atômica.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Caminho relativo ou absoluto do arquivo."},
+                    "action": {"type": "string", "enum": ["create_file", "replace_symbol", "patch_diff"]},
+                    "target_symbol": {"type": "string", "description": "Obrigatório em replace_symbol."},
+                    "code_content": {"type": "string", "description": "Conteúdo completo ou unified diff."},
+                    "explanation": {"type": "string", "description": "Resumo de 1 linha da alteração."},
+                },
+                "required": ["path", "action", "code_content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user",
+            "description": "Faz uma pergunta ao usuário quando faltar informação essencial.",
+            "parameters": {
+                "type": "object",
+                "properties": {"question": {"type": "string"}},
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "done",
+            "description": "Encerra o turno de desenvolvimento com um resumo do que foi feito.",
+            "parameters": {
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            },
+        },
+    },
+]
 
 
 def build_agent_system_prompt(
