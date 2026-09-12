@@ -17,6 +17,15 @@ def test_ask_e_deps_documentados_no_help():
     assert "/deps" in _COMMANDS
 
 
+def test_comandos_de_sessao_documentados_no_help():
+    assert "/sessions" in _HELP
+    assert "/use" in _HELP
+    assert "/delete" in _HELP
+    assert "/sessions" in _COMMANDS
+    assert "/use" in _COMMANDS
+    assert "/delete" in _COMMANDS
+
+
 def test_split_ask_separa_doc_type():
     assert _split_ask("como login? --doc-type support") == ("como login?", "support")
     assert _split_ask("como login?") == ("como login?", None)

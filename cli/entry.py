@@ -15,14 +15,15 @@ Inicia a interface interativa (TUI) na raiz do projeto (padrão: diretório atua
 
 OPÇÕES:
   --project NOME    premissas projects/<nome>.yaml do diretório de config
+  --session NOME    sessão a abrir/recriar (padrão: 'default')
   --readonly        somente leitura (bloqueia execução/escrita)
   --model M         modelo/perfil do backend            (padrão: gemini-pro)
-  --base-url URL    base URL compatível com Ollama      (padrão: http://127.0.0.1:8765)
+  --base-url URL    base URL do CapoeiraHost            (padrão: http://127.0.0.1:8765)
   --timeout SEG     timeout por chamada ao backend      (padrão: 180)
   -h, --help        mostra esta ajuda
 """
 
-_VALUE_FLAGS = {"--project", "--model", "--base-url", "--timeout"}
+_VALUE_FLAGS = {"--project", "--model", "--base-url", "--timeout", "--session"}
 
 
 def main(argv=None) -> None:
@@ -67,12 +68,16 @@ def _parse_flags(path: str, flags: list[str]) -> dict:
         "model": DEFAULT_MODEL,
         "timeout": DEFAULT_TIMEOUT,
         "readonly": False,
+        "session_name": None,
     }
     i = 0
     while i < len(flags):
         flag = flags[i]
         if flag == "--project" and i + 1 < len(flags):
             kwargs["project"] = flags[i + 1]
+            i += 2
+        elif flag == "--session" and i + 1 < len(flags):
+            kwargs["session_name"] = flags[i + 1]
             i += 2
         elif flag == "--readonly":
             kwargs["readonly"] = True

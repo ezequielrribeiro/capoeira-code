@@ -1,8 +1,7 @@
-import json
-from dataclasses import dataclass
-from typing import Optional
 import urllib.error
+import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8765"
 DEFAULT_MODEL = "gemini-pro"
@@ -13,44 +12,61 @@ SYSTEM_PROMPT = "Você é o motor CapoeiraCode. Responda APENAS em formato JSON 
 
 @dataclass
 class ChatReply:
-    """Resposta do backend: texto livre e/ou chamadas de ferramenta (tool_calls)."""
+    """Resposta do backend (texto puro): prosa final e/ou linhas [TOOL_CALL]."""
 
     content: str = ""
-    tool_calls: Optional[list[dict]] = None
-
-    @property
-    def has_tool_calls(self) -> bool:
-        return bool(self.tool_calls)
 
 
-def _extract_tool_calls(message: dict) -> Optional[list[dict]]:
-    """Normaliza `message.tool_calls` do Ollama para [{name, arguments}].
+def _textual_prop_type(prop: dict) -> str:
+    """Mapeia um tipo do JSON Schema de ferramenta para o contrato textual do host."""
+    ptype = prop.get("type")
+    if ptype == "integer":
+        return "int"
+    if ptype == "number":
+        return "float"
+    if ptype == "boolean":
+        return "bool"
+    if ptype == "array":
+        items_type = (prop.get("items") or {}).get("type")
+        if items_type == "integer":
+            return "int[]"
+        if items_type == "number":
+            return "float[]"
+        return f"{items_type or 'string'}[]"
+    return "string"
 
-    Ollama usa `{"function": {"name": ..., "arguments": {}}}`; alguns gateways
-    já entregam `{"name": ..., "arguments": {}}`. Aceita ambos.
+
+def serialize_tools(tools) -> str:
+    """Serializa declarações de ferramentas (JSON schema) no contrato textual do host.
+
+    Cada ferramenta vira uma linha `name=X | desc=... | arg:type` (uma por linha),
+    como o campo `tools` de `/api/chat` espera.
     """
-    raw = message.get("tool_calls")
-    if not raw:
-        return None
-    out = []
-    for call in raw:
-        if not isinstance(call, dict):
+    lines: list[str] = []
+    for tool in tools or []:
+        fn = tool.get("function") if isinstance(tool, dict) else None
+        if not isinstance(fn, dict):
             continue
-        fn = call.get("function") or call
-        name = fn.get("name") if isinstance(fn, dict) else None
-        arguments = fn.get("arguments") if isinstance(fn, dict) else None
+        name = fn.get("name", "")
         if not name:
             continue
-        args = arguments if isinstance(arguments, dict) else {}
-        out.append({"name": name, "arguments": args})
-    return out or None
+        parts = [f"name={name}"]
+        desc = (fn.get("description") or "").replace("\n", " ").strip()
+        if desc:
+            parts.append(f"desc={desc}")
+        for key, prop in ((fn.get("parameters") or {}).get("properties") or {}).items():
+            parts.append(f"{key}:{_textual_prop_type(prop)}")
+        lines.append(" | ".join(parts))
+    return "\n".join(lines)
 
 
 class LLMClient:
-    """Cliente HTTP/JSON compatível com a API `/api/chat` do Ollama.
+    """Cliente HTTP do CapoeiraHost (protocolo textual, API `POST /api/chat`).
 
-    Funciona com o Ollama nativo (`http://127.0.0.1:11434`) e com gateways
-    Ollama-compatíveis como o CapoeiraHost (`http://127.0.0.1:8765`).
+    O CapoeiraHost (`http://127.0.0.1:8765`, default) é o único backend e usa
+    `application/x-www-form-urlencoded` com resposta `text/plain` (fora do padrão
+    Ollama). Stateless: cada requisição é autocontida (histórico completo) e o host
+    cria uma conversa nova por request.
     """
 
     def __init__(
@@ -67,15 +83,12 @@ class LLMClient:
 
     def chat(self, prompt: str) -> str:
         """Envia um turno user e retorna o texto da resposta do modelo."""
-        body = {
-            "model": self.model,
-            "stream": False,
-            "messages": [
+        return self.chat_messages(
+            [
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": prompt},
-            ],
-        }
-        return self.chat_messages(body["messages"]).content
+            ]
+        ).content
 
     def chat_messages(
         self,
@@ -84,86 +97,62 @@ class LLMClient:
         on_chunk=None,
         tools=None,
     ) -> ChatReply:
-        """Envia uma conversa e retorna um `ChatReply` (texto + tool_calls).
+        """Envia uma conversa (form-urlencoded) e retorna um `ChatReply` (texto).
 
-        Com `stream=True` (NDJSON do Ollama), lê respostas incrementalmente,
-        acumula `message.content`, chama `on_chunk(texto)` por fragmento e, no
-        chunk final (`done:true`), captura `message.tool_calls`. Opcionalmente
-        envia `tools` (declaração das ferramentas) para modelos com tool calling.
+        `messages` é o histórico completo (stateless): pares `role`/`content` na
+        ordem; `role=tool` leva `tool_call_id`. Com `tools`, declara as ferramentas
+        no contrato textual (tool calling simulado do host). Com `stream=True`, lê a
+        resposta em texto puro e chama `on_chunk(texto)` por fragmento.
         """
-        body = {
-            "model": self.model,
-            "stream": bool(stream),
-            "messages": messages,
-        }
+        fields: list[tuple[str, str]] = [("model", self.model)]
+        for message in messages:
+            role = message.get("role", "")
+            if not role:
+                continue
+            fields.append(("role", role))
+            fields.append(("content", str(message.get("content") or "")))
+            if role == "tool" and message.get("tool_call_id"):
+                fields.append(("tool_call_id", str(message["tool_call_id"])))
         if tools is not None:
-            body["tools"] = tools
+            fields.append(("tools", serialize_tools(tools)))
+        fields.append(("stream", "true" if stream else "false"))
+
         request = urllib.request.Request(
             f"{self.base_url}/api/chat",
-            data=json.dumps(body).encode("utf8"),
-            headers={"Content-Type": "application/json"},
+            data=urllib.parse.urlencode(fields).encode("utf8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as resp:
-                if not stream:
-                    raw = resp.read().decode("utf8")
-                else:
+                if stream:
                     return self._read_stream(resp, on_chunk)
+                return ChatReply(content=resp.read().decode("utf8"))
         except urllib.error.HTTPError as e:
             raise LLMRequestError(self._http_error_message(e)) from e
         except urllib.error.URLError as e:
             raise LLMRequestError(f"Não foi possível conectar em {self.base_url}: {e.reason}") from e
 
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise LLMRequestError(f"Resposta não-JSON do backend: {e}") from e
-
-        message = data.get("message") or {}
-        content = message.get("content") or ""
-        tool_calls = _extract_tool_calls(message)
-        if not content and tool_calls is None:
-            raise LLMRequestError("O backend retornou uma resposta sem conteúdo.")
-        return ChatReply(content=content, tool_calls=tool_calls)
-
     @staticmethod
     def _read_stream(resp, on_chunk) -> ChatReply:
-        """Lê a resposta streaming (NDJSON) e acumula content/tool_calls."""
+        """Lê a resposta streaming (texto puro em chunks) e acumula o conteúdo."""
         parts: list[str] = []
-        tool_calls: Optional[list[dict]] = None
         for raw_line in resp:
-            line = raw_line.decode("utf8", errors="replace").strip()
+            line = raw_line.decode("utf8", errors="replace")
             if not line:
                 continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            message = data.get("message") or {}
-            content = message.get("content") or ""
-            if content:
-                parts.append(content)
-                if on_chunk is not None:
-                    on_chunk(content)
-            calls = _extract_tool_calls(message)
-            if calls is not None:
-                tool_calls = calls
-        return ChatReply(content="".join(parts), tool_calls=tool_calls)
+            parts.append(line)
+            if on_chunk is not None:
+                on_chunk(line)
+        return ChatReply(content="".join(parts))
 
     @staticmethod
     def _http_error_message(error: urllib.error.HTTPError) -> str:
         status = error.code
-        body = error.read().decode("utf8", errors="replace")
-        detail = ""
-        if body:
-            try:
-                detail = json.loads(body).get("error", "")
-            except json.JSONDecodeError:
-                detail = body.strip()
+        body = error.read().decode("utf8", errors="replace").strip()
         base = f"Erro {status} do backend LLM em {error.url}"
-        if detail:
-            base += f": {detail}"
+        if body:
+            base += f": {body}"
         return base
 
 

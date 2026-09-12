@@ -4,12 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "capoeira-code"
-version = "4.0.0"
-description = "Agente CLI para manutenção, refatoração e criação de artefatos em sistemas legados (backend compatível com Ollama)"
+version = "6.0.0"
+description = "Agente CLI para manutenção, refatoração e criação de artefatos em sistemas legados (backend CapoeiraHost)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "click>=8.1.7",
     "pydantic>=2.7.0",
     "PyYAML>=6.0",
     "prompt_toolkit>=3.0",

@@ -9,6 +9,7 @@ def test_help_imprime_uso(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Uso:" in out
     assert "--project" in out
+    assert "--session" in out
 
 
 def test_sem_args_abre_tui_no_cwd(monkeypatch):
@@ -61,6 +62,18 @@ def test_flags_sem_path_nao_tratam_valor_como_path(monkeypatch):
     entry.main(["--project", "garagens"])
     assert chamadas["project"] == "garagens"
     assert chamadas["project_path"] == os.getcwd()  # "garagens" não virou PATH
+
+
+def test_flag_session_chega_ao_run_tui(monkeypatch):
+    chamadas = {}
+
+    def fake_run_tui(**kwargs):
+        chamadas.update(kwargs)
+
+    monkeypatch.setattr("cli.tui.app.run_tui", fake_run_tui)
+    entry.main(["--session", "refactor-login"])
+    assert chamadas["session_name"] == "refactor-login"
+    assert chamadas["project_path"] == os.getcwd()  # "refactor-login" não virou PATH
 
 
 def test_palavra_nao_option_e_tratada_como_path(monkeypatch):

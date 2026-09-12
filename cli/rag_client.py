@@ -17,8 +17,8 @@ class RagError(Exception):
 class RagClient:
     """Consulta o `local-rag-system` (CLI, via subprocess) para trazer contexto.
 
-    O RAG é independente do backend do CapoeiraCode: ele usa o Ollama nativo e
-    roda no working_dir informado nas premissas (rag.working_dir).
+    O RAG é independente do backend do CapoeiraCode e roda no working_dir
+    informado nas premissas (rag.working_dir).
     """
 
     def __init__(self, premises: Premises, timeout: float = DEFAULT_TIMEOUT):

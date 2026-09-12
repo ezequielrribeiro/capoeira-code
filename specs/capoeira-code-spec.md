@@ -1,9 +1,9 @@
 # 📜 Software Specification & Implementation Architecture: CapoeiraCode
 
 **Projeto:** CapoeiraCode  
-**Versão:** `5.0.0`  
-**Status:** `Approved — Iteração 7 (interação exclusiva via TUI) implementada e testada`  
-**Data:** 8 de Setembro de 2026  
+**Versão:** `6.0.0`  
+**Status:** `Approved — Iteração 9 (backend único CapoeiraHost v2.0 textual) implementada e testada`  
+**Data:** 12 de Setembro de 2026  
 
 ---
 
@@ -12,9 +12,10 @@
 ### 1.1. Propósito
 O **CapoeiraCode** é um agente CLI para manutenção, refatoração, criação de telas/artefatos
 e **automação de rotina** em **sistemas legados** (foco inicial em PHP). Reduz o contexto do
-código via AST (*Tree-Sitter*) e conversa com um **backend compatível com a API do Ollama** —
-Ollama nativo ou o gateway local [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host) —
-via HTTP/JSON (`POST /api/chat`). Não há navegador, extensão nem ponte WebSocket.
+código via AST (*Tree-Sitter*) e conversa com o gateway local
+[CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host) — único backend — via
+`POST /api/chat` (protocolo **textual**: form-urlencoded → `text/plain`). Não há navegador,
+extensão nem ponte WebSocket.
 
 A partir da v3.0.0 o CLI vira um **motor de instrução declarativo** (estilo OpenCode):
 especs/skills/prompts vivem em arquivos no diretório de config, e o LLM **decide a ação**
@@ -31,6 +32,14 @@ seguem política de permissão — até a conclusão da tarefa.
 Na **v5.0.0** a TUI é a **única interface**: o CLI one-shot (Click) foi removido. Consultas
 ao RAG e ao scanner continuam disponíveis como `/ask` e `/deps` dentro da TUI.
 
+Na **v6.0.0** o **CapoeiraHost (v2.0) é o único backend e usa protocolo textual**: removida
+a compatibilidade com o Ollama nativo (detecção `supports_single_chat`, `/chat-mode`, envio
+condicional de `new_chat`) e com o JSON no fio — as requisições são
+`application/x-www-form-urlencoded` e as respostas `text/plain`. O agente é **stateless**
+(histórico completo por requisição, sem `new_chat`, host abre conversa nova) e interpreta o
+contrato de tool calling textual (`[TOOL_CALL] nome | chave=valor`) ou prosa final — o JSON
+`{"steps":[...]}` e `message.tool_calls` não existem mais.
+
 Na v4.1.0 o fluxo vira de **criação do zero**: detecção de projeto vazio, atalho
 **`/bootstrap`** (pergunta stack/nome/banco e gera a base + `.sql`), **streaming**
 (`stream:true` com exibição incremental na TUI), diretório **`blueprints/`** no config
@@ -45,7 +54,7 @@ espalhado e não automatizável com subcomandos rígidos.
 
 ### 1.3. Objetivos de Design
 * **Economia Extrema de Tokens:** Redução de até 90% do contexto via AST (*Tree-Sitter*) e grafos de dependência locais.
-* **Backend-Agnóstico (API Ollama):** `POST {base_url}/api/chat`, funcionando com Ollama nativo ou gateways Ollama-compatíveis (CapoeiraHost) — sem chave de API.
+* **Backend Único (CapoeiraHost):** `POST {base_url}/api/chat` no gateway local [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host) (Gemini/Claude/Copilot 365/ChatGPT), sem chave de API. Suporte a Ollama nativo removido na v6.0.0.
 * **Motor de Instrução (estilo OpenCode):** o usuário fornece **instrução livre** + arquivos de `specs/skills/prompts`; um comando genérico (`run`) monta o prompt rico e o LLM decide as ações.
 * **Premissas por projeto:** arquivo `projects/<nome>.yaml` descreve stack, estrutura, convenções, banco (schema) e RAG — reutilizável entre projetos/empresas.
 * **Operação Atômica:** lote multi-arquivo todo-or-nothing (RNF-04) com `--dry-run` para revisão.
@@ -75,9 +84,9 @@ espalhado e não automatizável com subcomandos rígidos.
 │  │  atômico)      │                       │ HTTP POST /api/chat                  │
 │  └────────────────┘                        │                                      │
 └────────────────────────────────────────────┼──────────────────────────────────────┘
-                                              │ (JSON Ollama)
+                                              │ (JSON /api/chat)
                               ┌──────────────▼───────────────────┐
-                              │  LLM BACKEND (Ollama / CapoeiraHost)│
+                              │  CAPOEIRAHOST (gateway web)       │
                               └──────────────┬───────────────────┘
                                              │ subprocess (RAG próprio)
                               ┌──────────────▼───────────────────┐
@@ -139,40 +148,41 @@ class BaseLanguageReducer(ABC):
 
 ---
 
-## 4. Contrato de Comunicação com o LLM (HTTP, compatível com Ollama)
+## 4. Contrato de Comunicação com o LLM (CapoeiraHost v2.0 — textual)
 
-`POST {base_url}/api/chat`, protocolo Ollama `stream=false`, stdlib `urllib`.
+`POST {base_url}/api/chat` com **`application/x-www-form-urlencoded`** (campos `chave=valor`,
+pares repetidos) e resposta **`text/plain`** — o CapoeiraHost **v2.0 abandonou a API do
+Ollama** (sem JSON no fio). stdlib `urllib`.
 
 ### 4.1. Requisição
-```json
-{
-  "model": "gemini-pro",
-  "stream": false,
-  "messages": [
-    { "role": "system", "content": "Você é o motor CapoeiraCode. Responda APENAS em formato JSON válido." },
-    { "role": "user", "content": "[PROMPT COM PERFIL + SPECS + SKILLS + RAG + INSTRUÇÃO]" }
-  ]
-}
 ```
-* `base_url` padrão `http://127.0.0.1:8765` (CapoeiraHost); Ollama nativo `http://127.0.0.1:11434`.
-* No modo agente, a requisição também pode levar `tools` (declaração de ferramentas
-  `read_file|list_dir|run_shell|run_python|write_file|ask_user|done` no formato Ollama
-  `{"type":"function","function":{name, description, parameters}}`) para modelos com
-  tool-calling nativo — `cli/prompts.py::TOOLS_DECLARATION`.
+model=gemini-pro
+role=system&content=<...>
+role=user&content=[PROMPT COM PERFIL + SPECS + SKILLS + RAG + INSTRUÇÃO]
+tools=name=read_file | desc=... | path:string...
+stream=false
+```
+* `model` (obrigatório) é o **perfil de provedor** do registry do host (ex.: `gemini-pro`).
+* Pares **`role`/`content` repetidos** (na ordem da conversa; `role ∈ user|assistant|system|tool`);
+  em `role=tool`, campo adicional **`tool_call_id`**. `role=tool` **exige** `tools` no request.
+* **`tools` textual** (tool calling simulado): uma ferramenta por linha
+  `name=X | desc=... | arg:type` — `cli/llm_client.py::serialize_tools` serializa
+  `cli/prompts.py::TOOLS_DECLARATION`.
+* **Stateless (sem `new_chat`):** o histórico completo é enviado; o host usa o default
+  `CAPOEIRA_NEW_CHAT=true` — conversa nova a cada requisição. Não há detecção de backend
+  nem `/chat-mode`.
 
 ### 4.2. Resposta
-```json
-{ "model": "gemini-pro", "message": { "role": "assistant", "content": "{ ... }" }, "done": true }
-```
-O cliente devolve um `ChatReply` (`cli/llm_client.py`): `content` (texto livre) **e/ou**
-`tool_calls` normalizados como `[{"name", "arguments"}]`. Aceita tanto o formato nativo
-`{"function": {"name", "arguments"}}` quanto `{"name", "arguments"}` direto. A resposta é
-considerada vazia (erro `LLMRequestError`) somente se não houver `content` **nem** `tool_calls`.
+`text/plain`. Com `tools` no request (modo tool), o host devolve **ou** as linhas
+`[TOOL_CALL] nome | chave=valor` (uma por chamada; prosa removida) **ou** a prosa final
+(com linhas `[TOOL_CALL]` removidas). Sem `tools`, devolve o texto do modelo.
+O cliente devolve um `ChatReply` com `content` = o corpo lido (sem `tool_calls` estruturado).
+
 ### 4.3. Tempo de espera e streaming
 `--timeout` (padrão 180 s); rede timeout ou back-end exceder o prazo levantam `LLMRequestError` → exit 1.
-No modo agente, `chat_messages(..., stream=True, on_chunk)` usa `stream:true` (NDJSON linha a
-linha do Ollama) para exibir a resposta em tempo real; o texto completo é acumulado antes do
-parse/execução das ferramentas.
+Com `chat_messages(..., stream=True, on_chunk)`, o cliente lê **texto puro** (chunks, sem
+NDJSON) e chama `on_chunk` por fragmento. No modo tool (sempre ativo no agente), o host só
+entrega a resposta ao final da geração.
 
 ---
 
@@ -208,45 +218,70 @@ Todo prompt de mutação injeta o contrato de resposta. Duas formas aceitas:
 * `apply_payload(raw, expected_file_path=None)`: com `expected_file_path`, o formato único é obrigado a casar o caminho (postura do `generate`).
 * **Staging**: todas as ações são preparadas em memória (criações, splices de byte-range, diffs, re-parse); qualquer falha ⇒ `ApplyResult(ok=False)` e **nada** é gravado. Só após todas as validações os arquivos são escritos (tmp + `os.replace` por arquivo). *Isso estende a RNF-04 ao lote.*
 
-### 5.1. Contrato de ferramentas do modo agente (TUI, v4.0.0)
+### 5.1. Contrato de ferramentas do modo agente (TUI, textual CapoeiraHost v2.0)
 
-No modo agente o motor aceita **duas formas** de pedir a execução de ferramentas:
+No modo agente (CapoeiraHost v2.0, textual) o motor aceita **duas formas** de pedir a
+execução de ferramentas — o JSON `{"steps":[...]}` e `message.tool_calls` **não existem**
+mais no host:
 
-**A) Tool-calling nativo (v5.1.0, preferencial):** o backend responde com
-`message.tool_calls`. O agente converte cada chamada em um passo equivalente do contrato
-abaixo (`_tool_call_to_step` em `cli/tui/agent.py`, com normalização de nomes), executa
-localmente via `apply_step` e devolve o resultado como mensagem `{"role":"tool",
-"tool_name": <nome>, "content": ...}` — mantendo a ida-e-volta nativa com o modelo até ele
-emitir `done`. A execução é a mesma (multiplataforma, `os.path`/`subprocess`):
-`read_file`/`list_dir` automáticas, `run_shell`/`run_python` com timeout e truncamento,
-`write_file` via `ChangeApplier` (atômico + multi-arquivo).
+**A) Linhas `[TOOL_CALL] nome | chave=valor` (tool calling simulado):** o modelo emite uma
+linha por chamada no formato textual (valor com espaço usa aspas simples `'...'`; números e
+booleanos diretos; listas como `[1, 120]`). O host devolve as linhas como `text/plain`
+(prosa removida) ou, sem linha válida, a prosa final (linhas removidas). O agente parseia
+em `_parse_tool_call_lines` (regex `_TOOL_CALL_LINE`, com `_parse_value` para tipos),
+normaliza nomes (`_normalize_tool_name`), executa cada passo via `apply_step` e registra a
+mensagem assistant **com o texto da linha** (round-trip correto no transcript `[TOOL_CALL]`
+do host). **N linhas numa resposta são executadas num único próximo request**; cada
+resultado `role:"tool"` carrega um `tool_call_id` (`call_0`, `call_1`, …) — o transcript
+renderiza `[TOOL_RESULT] (id) conteúdo`, associando chamada e resultado.
 
-**B) Tool-calling simulado (fallback):** o LLM responde a cada turno com `{"steps":[...]}`
-em `message.content`:
-
-```json
-{
-  "steps": [
-    { "tool": "read_file",  "path": "app/views/vagas.php", "lines": [1, 120] },
-    { "tool": "list_dir",   "path": "app" },
-    { "tool": "run_shell",  "cmd": "php -l app/views/vagas.php" },
-    { "tool": "run_python", "code": "import os; print(os.listdir('.'))" },
-    { "tool": "write_file", "path": "app/models/Db.php", "action": "replace_symbol",
-      "target_symbol": "conectar", "code_content": "..." },
-    { "tool": "ask_user",   "question": "Qual o nome da tela?" },
-    { "tool": "done",       "message": "Resumo do que foi feito" }
-  ]
-}
-```
+**B) Prosa final:** se o conteúdo não tiver linhas `[TOOL_CALL]` válidas, é tratado como
+**prosa final** (`_unwrap_text`) e o turno encerra com `done`.
 
 * `read_file`/`list_dir` são **leituras automáticas** (sem aprovação).
+* **Valores de linha única e pipes**: o `[TOOL_CALL]` textual é uma linha física — `Enter` real
+  dentro de um valor corta a chamada (o host corta no primeiro `\n`, ex.:
+  `code_content='<?php`). `|` separa argumentos **fora** de aspas simples e é **literal dentro**
+  de `'...'` (`_split_pipe_fields`): `cmd='php -l app | tail -5'` funciona.
+* **Conteúdo em base64 (estrito)**: `write_file.code_content` (arquivo inteiro/fragmento/diff) e
+  `run_python.code` viajam em **base64** (bloco contínuo `A-Za-z0-9+/=`, sem quebras de linha) —
+  `code_content=PD9waHAKJG1zZyA9ICJvaSI7Cg==` — para evitar problemas de conversão no transporte.
+  O agente decodifica em `_decode_b64` (estrito: tamanho %4, charset/padding, UTF-8); inválido ou
+  truncado → **não grava/executa** e devolve `role:"tool"` com erro pedindo base64 válido.
+  Valor com aspas não fechadas (cortado) é sinalizado `_truncated` e **não é gravado**: o agente
+  devolve `role:"tool"` com erro instruindo o reenvio em UMA linha.
+* O retorno de cada passo é uma mensagem `role:"tool"` com `tool_call_id` — o transcript do
+  host renderiza `[TOOL_RESULT] (id) ...`.
 * `run_shell`/`run_python` executam no **cwd do projeto** (`subprocess`), com timeout e
   saída truncada (limite ~8.000 chars).
 * `write_file` aplica via **`ChangeApplier`** (atômico e multi-arquivo).
 * `ask_user` é bloqueante na TUI; a resposta vira contexto.
 * `done` encerra o turno; sem `done`, o loop itera até `--max-turns` (padrão 20) ou
   interrupção (`Ctrl+C`).
-* Fragmento único (objeto com `tool`) também é aceito como atalho de um passo.
+
+### 5.2. Modo stateless com CapoeiraHost (v6.0.0, textual)
+
+Desde a v6.0.0 o CapoeiraHost é o **único backend** e o agente opera em **stateless** — o
+modo chat único (`new_chat:false` + delta incremental, v5.2.0) foi **desativado** porque não
+se adequava ao formato de requisições/respostas do round-trip de tool calls:
+
+* **Sem `new_chat` no form**: cada requisição `POST /api/chat` é autocontida; o host abre
+  uma conversa nova por request (default `CAPOEIRA_NEW_CHAT=true`). Não há reutilização de
+  um chat aberto na aba.
+* **Histórico completo por requisição**: cada request envia o sistema
+  (perfil/specs/skills/contrato) + as últimas `MAX_CONTEXT_MESSAGES` (40) mensagens do
+  `session.jsonl` (`AgentRun._build_prompt_messages`), como pares `role`/`content`. Não há
+  `_sent_count`.
+* **Resposta final por texto**: o modelo responde prosa pura (o host devolve `text/plain`
+  com linhas `[TOOL_CALL]` removidas). Nesse caso (sem linhas `[TOOL_CALL]`), o agente
+  **encerra o turno** com `done` e essa mensagem. Um unwrap defensivo (`_unwrap_text`)
+  cobre o contrato `{"text": "..."}` legado.
+* **Paralelismo (contrato textual, linha a linha)**: `[TOOL_CALL] nome | chave=valor`
+  múltiplas linhas ⇒ chamadas paralelas. O agente executa todas e devolve os resultados num
+  único próximo request — cada `role:"tool"` associado por `tool_call_id`.
+* **1 requisição por vez**: o loop do agente é serial (cliente `urllib` síncrono + fila FIFO
+  do host). Um turno com N `[TOOL_CALL]` executa e devolve **todos os `role:"tool"` num único
+  próximo request**, virando 1 ciclo completo de geração por request.
 
 ---
 
@@ -254,7 +289,7 @@ em `message.content`:
 
 * **RNF-01 (Performance):** ✅ esqueletos em <200 ms para até 5.000 linhas (medido ~97 ms).
 * **RNF-02 (Segurança Local):** ✅ comunicação só com loopback local; RAG via subprocess na máquina.
-* **RNF-04 (Atomicidade):** ✅ falha de parse/validação ⇒ nada é escrito; **extendido ao lote multi-arquivo** (all-or-nothing). No agente (TUI), formato inválido é sinalizado e o turno segue (máx. `max_turns`, padrão 20).
+* **RNF-04 (Atomicidade):** ✅ falha de parse/validação ⇒ nada é escrito; **extendido ao lote multi-arquivo** (all-or-nothing). No agente (TUI), respostas sem linhas `[TOOL_CALL]` são tratadas como prosa final e encerram o turno (máx. `max_turns`, padrão 20).
 
 > RNF-03 (reconexão de extensão) migrou para o CapoeiraHost na v2.0.0 e permanece fora.
 
@@ -266,8 +301,8 @@ em `message.content`:
 capoeira-code/
 ├── cli/                            # ✅ implementado
 │   ├── entry.py                    # entry `capoeira`: PATH + flags → SEMPRE a TUI (única interface)
-│   ├── llm_client.py               # HTTP /api/chat (Ollama-compatível, urllib; chat_messages + stream)
-│   ├── prompts.py                  # Contratos de prompt; TOOLS_CONTRACT do agente (steps)
+│   ├── llm_client.py               # HTTP /api/chat (CapoeiraHost, urllib; chat_messages + stream)
+│   ├── prompts.py                  # Contratos de prompt; TOOLS_CONTRACT do agente (tool calling textual)
 │   ├── applier.py                  # Aplicador atômico multi-arquivo (stage/commit)
 │   ├── instruction/                # loader de specs/skills/prompts/blueprints (+ render_project_profile)
 │   ├── project/                    # premises.py (yaml) + scanner.py (deps/tabelas)
@@ -278,10 +313,10 @@ capoeira-code/
 │   │   ├── scan_artifacts.py       # gera tree.txt, dependencies.json, asts/ (+ is_empty_project)
 │   │   ├── permissions.py          # política de permissão (leitura auto; ask/readonly/auto)
 │   │   ├── tools.py                # executores: read/list/run_shell/run_python/write_file
-│   │   ├── agent.py                # loop do agente: steps → execução → até done/max_turns
+│   │   ├── agent.py                # loop do agente: tool calls → execução → até done/max_turns
 │   │   └── bootstrap.py            # instrução/funções do criar-do-zero (/bootstrap)
 │   └── reducers/                   # Tree-Sitter PHP/JS/Python
-├── tests/                          # ✅ 123 testes pytest
+├── tests/                          # ✅ 137 testes pytest
 │   ├── test_reducers_*.py          # PHP/JS/Python
 │   ├── test_applier.py
 │   ├── test_applier_multi.py
@@ -325,7 +360,23 @@ python -m cli [PATH] [...]    # equivalente (entry único)
 * Dentro da TUI, `/`-comandos: `/help`, `/model`, `/base-url`, `/premises`, `/rescan`,
   `/reset`, `/bootstrap`, `/max-turns N`, `/readonly`, **`/ask`**, **`/deps`**, `/quit`.
 * `run`/`refactor`/`generate`/`explain` one-shot deixaram de existir como CLI — o mesmo
-  motor é usado pelo agente (sessão/`steps`, além das ferramentas nativas).
+  motor é usado pelo agente (tool calling + ferramentas nativas).
+
+### 8.1.1. Cliente LLM (`cli/llm_client.py`)
+```python
+class ChatReply: content: str  # texto puro (prosa final e/ou linhas [TOOL_CALL])
+class LLMClient(base_url, model, timeout):
+    chat_messages(messages, stream=False, on_chunk=None, tools=None) -> ChatReply
+        # POST {base_url}/api/chat (form-urlencoded): model, pares role/content,
+        # tool_call_id (role=tool), tools (textual), stream — sem new_chat (stateless)
+class LLMRequestError(Exception)
+serialize_tools(tools) -> str   # linhas 'name=X | desc=... | arg:type'
+```
+* Único backend: CapoeiraHost v2.0 (`DEFAULT_BASE_URL = http://127.0.0.1:8765`), protocolo
+  **textual** (form-urlencoded → `text/plain`). Sem detecção de backends, sem `/api/tags`,
+  sem `/chat-mode` (v6.0.0).
+* Stateless: `new_chat` nunca é enviado (host abre conversa nova por request); histórico
+  completo via pares `role`/`content`; streaming de **texto puro** (`_read_stream`).
 
 ### 8.2. Premissas (`cli/project/premises.py`)
 ```python
@@ -379,7 +430,12 @@ ApplyResult: ok, message, error, payload(CapoeiraResponse|None), staged(dict|Non
 * **`scan_artifacts.py`**: `generate_artifacts(session, premises)` → `{tree, num_files, ast_files, dependencies}`; persiste `tree.txt`, `dependencies.json`, `asts/<relpath>`; `artifacts_summary(result)` enxuto para o prompt.
 * **`permissions.py`**: `PermissionGate(mode)` — `read_file/list_dir` sempre; `run_shell/run_python/write_file` conforme `ask` (y/n/a com "sempre na sessão"), `readonly` (nega), `auto` (aceita).
 * **`tools.py`**: `apply_step(step, cwd, python, timeout)` → `ToolResult{ok, output}`; `write_file` delega ao `ChangeApplier` (aplicação imediata, caminho-resolvido como `expected`).
-* **`agent.py`**: `AgentRun.run(user_prompt, ask_user, ask_permission)` — loop de `steps` até `done`; resultados de ferramentas viram mensagens de contexto; persistidos no `session.jsonl` (retomável).
+* **`agent.py`**: `AgentRun.run(user_prompt, ask_user, ask_permission)` — loop até `done`
+  (protocolo textual CapoeiraHost v2.0): linhas `[TOOL_CALL] nome | chave=valor` são
+  executadas, prosa final encerra o turno; resultados de ferramentas viram mensagens de
+  contexto (`role:"tool"` com `tool_call_id`); stateless — histórico completo
+  (`MAX_CONTEXT_MESSAGES`) enviado a cada requisição; persistidos no `session.jsonl`
+  (retomável).
 
 ### 8.7. Entry point (`cli/entry.py`, `pyproject.toml`)
 ```python
@@ -402,3 +458,4 @@ Instalação: `pip install -e .` cria os executáveis `capoeira`/`capoeira-code`
 | `4.0.0` | 08/09/2026 | **Iteração 5 (modo agente/TUI)**: 122 testes. `capoeira [PATH]` abre a **TUI interativa** (prompt_toolkit + rich) estilo OpenCode representando todo o fluxo da visão (item 5): workspace de sessão por projeto em `configs/<slug>/` (`session.jsonl` retomável, 1 sessão ativa + `/reset`); artefatos de scan `tree.txt`/`dependencies.json`/`asts/`; **loop de agente** com contrato de ferramentas (§5.1) — `read_file/list_dir/run_shell/run_python/write_file/ask_user/done`, aplicação `write_file` via applier, política de permissão (`readonly`/`ask`/`auto`, leitura automática, `--readonly`); `chat_messages` no `LLMClient`; entry point `capoeira` (pyproject) + subcomando `tui`; `python -m cli [PATH]` também funciona via `cli/entry.py`. Requires +`prompt_toolkit`/`rich`. |
 | `4.1.0` | 08/09/2026 | **Iteração 6 (criar do zero)**: 131 testes. **Bootstrap** na TUI — `is_empty_project` (sem código e sem manifest), comando `/bootstrap` (template `prompts/bootstrap.md` ou padrão embutido) que pergunta stack/nome/banco via `ask_user`, gera a base e `database/schema.sql` + `migrations/*.sql` (execução fica com o usuário). **Streaming** no `LLMClient.chat_messages(stream=True, on_chunk)` (NDJSON) com exibição incremental no agente. **`blueprints/`** no config (exemplos de estrutura definidos pelo usuário, seleção por `blueprints:` nas premissas) injetado no prompt do agente. UX: autocompletar de `/comandos`, `/max-turns`. Ratifica que a stack é definida pelo usuário (blueprints/.md/prompt), nunca hardcoded. |
 | `5.0.0` | 08/09/2026 | **Iteração 7 (TUI-only)**: 123 testes. **Removido o CLI one-shot** (`cli/main.py` — grupo Click e handlers `run/refactor/generate/explain/ask/deps`). `capoeira [PATH] [flags]` passa a ser a **única interface** (entrada em `cli/entry.py` parsa PATH + `--project/--readonly/--model/--base-url/--timeout/-h` e sempre chama `run_tui`). Capacidades antes só de CLI tornam-se `/comandos` da TUI: **`/ask`** (RAG via subprocess) e **`/deps`** (módulo/dependências/tabelas via scanner), com helpers `_ask_query`/`_deps_report` testáveis. Testes de CLI (test_cli/test_cli_motor) removidos; `test_entry.py` reescrito; novo `test_tui_slash.py`. Breaking: exclusive TUI. |
+| `6.0.0` | 12/09/2026 | **Iteração 9 (backend único CapoeiraHost v2.0 — textual)**: 137 testes. **Protocolo textual** (CapoeiraHost v2.0 removeu a API do Ollama): `llm_client.py` reescrito — `POST /api/chat` com `application/x-www-form-urlencoded` (pares `role`/`content`, `tool_call_id` em `role=tool`, `tools` textual via `serialize_tools`, `stream`, sem `new_chat`) e resposta `text/plain`; streaming de texto puro (sem NDJSON); `ChatReply` sem `tool_calls`. **Agente**: parser `_parse_tool_call_lines`/`_extract_tool_call_lines` para `[TOOL_CALL] nome | chave=valor` (`_parse_value`: aspas simples, números/bools, listas `[...]`); assistant registrado com a linha textual; `_record_assistant_tool_calls`/`_tool_call_to_step`/`_extract_tool_calls` removidos. `TOOLS_CONTRACT` no contrato textual. Também: removida a compatibilidade com o Ollama nativo (detecção `supports_single_chat`, `/chat-mode`, `single_chat`/`set_single_chat`, envio condicional de `new_chat`), JSON `{"steps":[...]}` e `message.tool_calls`; agente stateless (histórico completo, `MAX_CONTEXT_MESSAGES`, host abre conversa nova). Dependência `click` removida. Docs (README, AGENTS) atualizadas. Breaking: somente CapoeiraHost textual. |

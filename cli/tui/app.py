@@ -1,6 +1,7 @@
 """TUI textual interativa (prompt_toolkit + rich) estilo OpenCode."""
 
 import os
+import shutil
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
@@ -15,14 +16,17 @@ from ..rag_client import RagClient, RagError, RagNotConfiguredError
 from .agent import AgentOptions, AgentRun
 from .bootstrap import bootstrap_instruction
 from .scan_artifacts import artifacts_summary, generate_artifacts, is_empty_project
-from .session import Session, slugify
+from .session import DEFAULT_SESSION, Session, slugify
 
 _HELP = """/help            - esta ajuda
 /model M        - troca o modelo (ex.: gemini-pro, qwen2.5-coder)
-/base-url URL   - troca a base URL do backend (ex.: http://127.0.0.1:8765)
+/base-url URL   - troca a base URL do CapoeiraHost (ex.: http://127.0.0.1:8765)
 /premises       - recarrega premissas e specs/skills/prompts do config
 /rescan         - regenera os artefatos de scan do projeto
-/reset          - apaga a sessão/histórico e rescan
+/reset          - apaga o histórico da sessão ATUAL e rescan
+/sessions       - lista as sessões salvas do projeto
+/use NOME       - cria/troca para a sessão NOME (históricos independentes)
+/delete NOME    - apaga a sessão NOME (com confirmação)
 /bootstrap       - cria um sistema do zero (pergunta stack/banco; gera .sql)
 /max-turns N    - limite de turnos do agente (padrão 20)
 /readonly       - alterna modo somente-leitura (bloqueia execução/escrita)
@@ -33,8 +37,18 @@ _HELP = """/help            - esta ajuda
 
 _COMMANDS = [
     "/help", "/model", "/base-url", "/premises", "/rescan", "/reset",
-    "/bootstrap", "/max-turns", "/readonly", "/ask", "/deps", "/quit", "/exit",
+    "/sessions", "/use", "/delete", "/bootstrap", "/max-turns", "/readonly",
+    "/ask", "/deps", "/quit", "/exit",
 ]
+
+
+class _UICtx:
+    """Contexto mutável da TUI: permite que os comandos de sessão troquem a
+    sessão/agente ativos em runtime (o loop local não pode ser reatribuído)."""
+
+    def __init__(self, session: Session, agent: AgentRun):
+        self.session = session
+        self.agent = agent
 
 
 def run_tui(
@@ -44,10 +58,11 @@ def run_tui(
     model: str | None = None,
     base_url: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    session_name: str | None = None,
 ) -> None:
     console = Console()
     config_dir = resolve_config_dir()
-    session = Session(config_dir, project_path or os.getcwd())
+    session = Session(config_dir, project_path or os.getcwd(), name=session_name)
     session.ensure()
 
     premises_name = project or slugify(session.project_path)
@@ -71,13 +86,14 @@ def run_tui(
         python=getattr(getattr(premises, "rag", None), "python", None),
     )
     agent = AgentRun(session, options, client)
+    ui = _UICtx(session, agent)
 
     console.print("[bold]CapoeiraCode[/bold] — modo agente interativo")
-    console.print(session.summarize())
+    console.print(ui.session.summarize())
     console.print(
-        f"Backend: {client.base_url} | Modelo: {client.model} | Projeto: {session.project_path}"
+        f"Backend: CapoeiraHost ({client.base_url}) | Modelo: {client.model} | Projeto: {ui.session.project_path}"
     )
-    if is_empty_project(artifacts, session.project_path):
+    if is_empty_project(artifacts, ui.session.project_path):
         console.print(
             "[yellow]Diretório parece vazio (projeto do zero). "
             "Digite /bootstrap ou descreva o sistema a criar.[/yellow]"
@@ -116,7 +132,7 @@ def run_tui(
             if text.lower() in ("/bootstrap", "/bootstrap "):
                 console.print("[dim]bootstrap... (Ctrl+C interrompe)[/dim]")
                 try:
-                    result = agent.run(
+                    result = ui.agent.run(
                         bootstrap_instruction(instr_set),
                         ask_user=ask_user,
                         ask_permission=ask_permission,
@@ -130,14 +146,14 @@ def run_tui(
                     console.print(f"[green]{result['message']}[/green]")
                 continue
             if not _handle_slash(
-                text, console, session, premises, instr_set, artifacts, client, options, agent,
+                text, console, ui, premises, instr_set, artifacts, client, options,
             ):
                 break
             continue
 
         console.print("[dim]agente em execução... (Ctrl+C interrompe)[/dim]")
         try:
-            result = agent.run(text, ask_user=ask_user, ask_permission=ask_permission)
+            result = ui.agent.run(text, ask_user=ask_user, ask_permission=ask_permission)
         except KeyboardInterrupt:
             console.print()
             console.print("[yellow]\nInterrompido pelo usuário. O contexto segue na próxima linha.[/yellow]")
@@ -197,13 +213,12 @@ def _deps_report(premises, path: str) -> str:
 def _handle_slash(
     text: str,
     console: Console,
-    session: Session,
+    ui: _UICtx,
     premises,
     instr_set,
     artifacts,
     client,
     options,
-    agent,
 ) -> bool:
     """Trata um comando '/x'. Retorna True para continuar o loop, False para sair."""
     parts = text.split(None, 1)
@@ -222,24 +237,63 @@ def _handle_slash(
         console.print(f"Base URL: {client.base_url}")
     elif cmd == "/premises":
         config_dir = resolve_config_dir()
-        name = premises.name or slugify(session.project_path)
+        name = premises.name or slugify(ui.session.project_path)
         premises = _reload_premises(config_dir, name, console, warn=True)
         instr_set = load_instruction_set(config_dir, premises)
         options.premises = premises
         options.instruction_set = instr_set
         console.print("Premissas recarregadas.")
     elif cmd == "/rescan":
-        artifacts = generate_artifacts(session, premises)
+        artifacts = generate_artifacts(ui.session, premises)
         options.artifacts_summary = artifacts_summary(artifacts)
         console.print(
             f"Scan refeito: {artifacts['num_files']} arquivos, {artifacts['ast_files']} ASTs."
         )
     elif cmd == "/reset":
-        session.reset()
-        artifacts = generate_artifacts(session, premises)
+        ui.session.reset()
+        artifacts = generate_artifacts(ui.session, premises)
         options.artifacts_summary = artifacts_summary(artifacts)
-        agent.messages = session.load_messages()
-        console.print("Sessão reiniciada (histórico apagado) e scan refeito.")
+        ui.agent.reset_messages()
+        console.print(f"Sessão '{ui.session.name}' reiniciada (histórico apagado) e scan refeito.")
+    elif cmd == "/sessions":
+        config_dir = resolve_config_dir()
+        names = Session.list_sessions(config_dir, ui.session.project_path)
+        if not names:
+            console.print("Nenhuma sessão salva ainda.")
+        for n in names:
+            marca = "  <- atual" if n == ui.session.name else ""
+            ss = Session(config_dir, ui.session.project_path, name=n)
+            estado = "tem histórico" if ss.has_history else "vazia"
+            console.print(f"  {n} ({estado}){marca}")
+    elif cmd == "/use" and arg:
+        config_dir = resolve_config_dir()
+        nova = Session(config_dir, ui.session.project_path, name=arg)
+        if nova.name == ui.session.name:
+            console.print(f"Já está na sessão '{ui.session.name}'.")
+            return True
+        nova.ensure()
+        ui.session = nova
+        ui.agent = AgentRun(nova, options, client)
+        console.print(ui.session.summarize())
+        console.print("[green]Sessão ativa trocada.[/green]")
+    elif cmd == "/delete" and arg:
+        config_dir = resolve_config_dir()
+        alvo = Session(config_dir, ui.session.project_path, name=arg)
+        if alvo.name == ui.session.name:
+            console.print("[red]Não é possível apagar a sessão em uso.[/red]")
+            return True
+        if alvo.name == DEFAULT_SESSION and alvo.has_history:
+            console.print("[red]Não é possível apagar a sessão 'default' com histórico.[/red]")
+            return True
+        if not alvo.dir.is_dir():
+            console.print(f"[red]Sessão '{alvo.name}' não existe.[/red]")
+            return True
+        confirm = console.input(f"[permissão] Apagar a sessão '{alvo.name}'? (y=sim) ")
+        if confirm.strip().lower()[:1] == "y":
+            shutil.rmtree(alvo.dir, ignore_errors=True)
+            console.print(f"Sessão '{alvo.name}' apagada.")
+        else:
+            console.print("Nada apagado.")
     elif cmd == "/bootstrap":
         console.print("[yellow]Use /bootstrap na linha de comando para iniciar.[/yellow]")
     elif cmd == "/max-turns" and arg:
@@ -250,7 +304,7 @@ def _handle_slash(
             console.print("[red]Valor inválido para /max-turns.[/red]")
     elif cmd == "/readonly":
         options.mode = "readonly" if options.mode != "readonly" else "ask"
-        agent.gate.mode = options.mode
+        ui.agent.gate.mode = options.mode
         state = "somente-leitura" if options.mode == "readonly" else "leitura+escrita (com aprovação)"
         console.print(f"Modo permissão: {state}")
     elif cmd == "/ask":
@@ -263,7 +317,7 @@ def _handle_slash(
         if not arg:
             console.print("[red]Uso: /deps <arquivo>[/red]")
         else:
-            path = arg if os.path.isabs(arg) else os.path.join(session.project_path, arg)
+            path = arg if os.path.isabs(arg) else os.path.join(ui.session.project_path, arg)
             console.print(_deps_report(premises, os.path.normpath(path)))
     else:
         console.print("[red]Comando desconhecido.[/red] /help para a lista.")

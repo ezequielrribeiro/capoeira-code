@@ -1,57 +1,35 @@
 import http.server
-import json
 import threading
+import urllib.parse
 
 import pytest
 
-from cli.llm_client import LLMClient, LLMRequestError, ChatReply
+from cli.llm_client import ChatReply, LLMClient
 
 
 class StreamHandler(http.server.BaseHTTPRequestHandler):
-    """Responde ao /api/chat com NDJSON (stream) quando `stream:true` no corpo."""
+    """Responde /api/chat em texto puro (chunks de linha), como o host."""
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length).decode("utf8"))
-        self.server.last_body = body
-        lines = []
+        raw = self.rfile.read(length).decode("utf8")
+        self.server.last_body = urllib.parse.parse_qs(raw, keep_blank_values=True)
 
-        def chunk(txt):
-            lines.append(json.dumps({"message": {"role": "assistant", "content": txt}, "done": False}))
-
-        if body.get("stream") is True:
-            chunk("ola")
-            chunk(" mundo")
-            chunk("!")
-            lines.append(json.dumps({"done": True}))
-            user_content = (body.get("messages") or [{}])[-1].get("content", "")
-            if user_content == "quero tool_calls":
-                lines.pop()
-                lines.append(
-                    json.dumps(
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": "olá",
-                                "tool_calls": [
-                                    {"function": {"name": "done", "arguments": {"message": "fim"}}}
-                                ],
-                            },
-                            "done": True,
-                        }
-                    )
-                )
+        stream_true = (self.server.last_body.get("stream") or ["false"])[0] == "true"
+        if stream_true:
+            user_content = (self.server.last_body.get("content") or [""])[-1]
+            if user_content == "quero_tool_call":
+                lines = b"[TOOL_CALL] done | message=fim\n"
+            else:
+                lines = b"ola\n mundo\n!\n"
         else:
-            lines.append(
-                json.dumps({"message": {"role": "assistant", "content": "nao-stream"}, "done": True})
-            )
+            lines = b"nao-stream\n"
 
-        payload = ("\n".join(lines) + "\n").encode("utf8")
         self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
-        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(lines)))
         self.end_headers()
-        self.wfile.write(payload)
+        self.wfile.write(lines)
 
     def log_message(self, *args):
         pass
@@ -80,28 +58,28 @@ def test_chat_stream_acumula_e_chama_on_chunk(stream_server):
         chunks.append(part)
 
     out = client.chat_messages([{"role": "user", "content": "oi"}], stream=True, on_chunk=on_chunk)
-    assert out == ChatReply(content="ola mundo!")
-    assert chunks == ["ola", " mundo", "!"]
-    assert stream_server.last_body["stream"] is True
+    assert out == ChatReply(content="ola\n mundo\n!\n")
+    assert chunks == ["ola\n", " mundo\n", "!\n"]
+    assert stream_server.last_body["stream"] == ["true"]
 
 
-def test_chat_stream_captura_tool_calls_no_chunk_final(stream_server):
+def test_chat_stream_entrega_linha_tool_call(stream_server):
     client = _client(stream_server)
     out = client.chat_messages(
-        [{"role": "user", "content": "quero tool_calls"}], stream=True, tools=[{"type": "function"}]
+        [{"role": "user", "content": "quero_tool_call"}],
+        stream=True,
     )
-    assert out.content == "ola mundo!olá"
-    assert out.tool_calls == [{"name": "done", "arguments": {"message": "fim"}}]
-    assert stream_server.last_body["tools"] == [{"type": "function"}]
+    assert out.content == "[TOOL_CALL] done | message=fim\n"
 
 
 def test_chat_stream_sem_on_chunk_retorna_conteudo(stream_server):
     client = _client(stream_server)
     out = client.chat_messages([{"role": "user", "content": "oi"}], stream=True)
-    assert out == ChatReply(content="ola mundo!")
+    assert out == ChatReply(content="ola\n mundo\n!\n")
 
 
 def test_chat_nao_stream_mantem_comportamento(stream_server):
     client = _client(stream_server)
-    out = client.chat_messages([{"role": "user", "content": "oi"}])  # padrão: não-stream
-    assert out == ChatReply(content="nao-stream")
+    out = client.chat_messages([{"role": "user", "content": "oi"}])
+    assert out == ChatReply(content="nao-stream\n")
+    assert stream_server.last_body["stream"] == ["false"]

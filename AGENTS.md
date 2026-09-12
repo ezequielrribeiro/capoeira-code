@@ -2,13 +2,15 @@
 
 ## Estado do repositório
 
-- **Iteração 7 concluída (v5.0.0)**: a **única interface é a TUI interativa**. O CLI
+- **Iteração 9 concluída (v6.0.0)**: a **única interface é a TUI interativa**. O CLI
   one-shot (Click: `run/refactor/generate/explain/ask/deps`) foi **removido** (`cli/main.py`
   apagado). `capoeira [PATH] [flags]` é o entregador universal (TUI com ferramentas,
-  bootstrap, streaming, `blueprints/`). Fala com LLM via **backend compatível com a API do
-  Ollama** (`POST /api/chat`, stdlib `urllib`). **Não existe comunicação via
+  bootstrap, streaming, `blueprints/`). Fala com LLM via o gateway **CapoeiraHost**
+  (`POST /api/chat`, protocolo **textual**: form-urlencoded → `text/plain`, stdlib
+  `urllib`) — **único backend** (a compatibilidade com o Ollama nativo foi removida na
+  v6.0.0). **Não existe comunicação via
   extensão/navegador**; esse papel é do [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host).
-- Fonte da verdade: `specs/capoeira-code-spec.md` (pt-BR, v5.0.0; §9 lista o histórico). Contratos de protocolo/schema vêm de lá; detalhes de implementação, o código manda.
+- Fonte da verdade: `specs/capoeira-code-spec.md` (pt-BR, v6.0.0; §9 lista o histórico). Contratos de protocolo/schema vêm de lá; detalhes de implementação, o código manda.
 - Documentação e strings visíveis ao usuário são em **pt-BR**.
 
 ## Comandos (Windows, a partir da raiz)
@@ -37,23 +39,25 @@ python -m venv .venv
 
 1. **`tree-sitter-languages` substituído** por `tree-sitter` + gramáticas oficiais (`tree-sitter-php`/`-javascript`/`-python`) — sem wheel p/ Python 3.13.
 2. **API tree-sitter 0.26**: não existem `Node.sexp()` nem `Query.captures()`. Use `str(node)` e `QueryCursor(Query(lang, scm))` com `.matches()` / `.captures()`.
-3. **Comunicação com LLM via `cli/llm_client.py`** (HTTP `POST /api/chat`, Ollama-compatível, stdlib) — a ponte WebSocket `server.py` foi removida em v2.0.0. Não recriar `websockets`/`extension/`.
+3. **Comunicação com LLM via `cli/llm_client.py`** (HTTP `POST /api/chat` do CapoeiraHost, protocolo **textual** via stdlib `urllib`) — a ponte WebSocket `server.py` foi removida em v2.0.0. Não recriar `websockets`/`extension/`.
 4. **Applier multi-arquivo**: `apply_payload` aceita ação única (compat) **ou** `{"files": [...]}`; `stage_payload`/`commit_staged` (dry-run, atomicidade all-or-nothing do lote).
 5. **`apply_payload(raw, expected_file_path=None)`**: com `write_file` do agente, o `file_path` retornado deve casar o alvo, senão falha sem escrever.
 6. **Motor de instrução** (`cli/instruction/loader.py` + `cli/project/premises.py` + `cli/rag_client.py`): premissas em `projects/<nome>.yaml` no dir de config; specs/skills/prompts/blueprints em `.md`; listas vazias significam "nenhum", omissão significa "todos".
-7. **TUI/agente** (`cli/tui/`): o LLM responde `{"steps":[...]}` (contrato §5.1); leitura auto, execução/escrita sob `PermissionGate` (ask/readonly/auto); workspace de sessão em `configs/<slug>/` + `session.jsonl`; entry `capoeira [PATH]` via `cli/entry.py` (sempre TUI; sem subcomandos).
+7. **TUI/agente** (`cli/tui/`): o LLM responde por **linhas `[TOOL_CALL] nome | chave=valor`** ou **prosa final** (contrato textual §5.1 do host; JSON `{"steps":[...]}` e `message.tool_calls` não existem mais no host); leitura auto, execução/escrita sob `PermissionGate` (ask/readonly/auto); workspace compartilhado por projeto em `configs/<slug>/workspace/` + **histórico por sessão** em `configs/<slug>/sessions/<nome>/session.jsonl` (legado `configs/<slug>/session.jsonl` migrado p/ `sessions/default/`); comandos `/sessions`, `/use NOME`, `/delete NOME` e flag `--session NOME`; entry `capoeira [PATH]` via `cli/entry.py` (sempre TUI; sem subcomandos).
 8. **Bootstrap/criar do zero**: `is_empty_project` (sem código indexado e sem `composer.json`/`package.json`/`pyproject.toml`/`requirements.txt`) → `/bootstrap` usa `prompts/bootstrap.md` (termo padrão embutido em `cli/tui/bootstrap.py`) e gera `.sql` para o usuário executar; stack nunca hardcoded — vem de `blueprints/`/`specs/`/`skills/`/prompt.
-9. **Streaming**: `LLMClient.chat_messages(stream=True, on_chunk)` lê NDJSON linha a linha e acumula; no agente, `AgentOptions.on_chunk != None` ativa o stream (testes com `stream=False`).
+9. **Streaming**: `LLMClient.chat_messages(stream=True, on_chunk)` lê **texto puro** (chunks; não NDJSON) e acumula; no agente, `AgentOptions.on_chunk != None` ativa o stream (testes com `stream=False`).
 10. **TUI-only (v5.0.0)**: `cli/main.py` (Click) apagado; `/ask` e `/deps` são slash commands com helpers `_ask_query`/`_deps_report` em `cli/tui/app.py`.
+11. **Backend único CapoeiraHost v2.0 (v6.0.0)**: removida a compatibilidade com o Ollama nativo — sem detecção (`LLMClient.supports_single_chat`, `/api/tags`, `HOST_PROVIDERS`, `PROBE_TIMEOUT`), sem `/chat-mode`, sem `single_chat`/`set_single_chat`; **protocolo textual** (form-urlencoded → `text/plain`, sem JSON no fio; `new_chat` nunca enviado, stateless; streaming de texto puro) e contrato de tool calling textual (`[TOOL_CALL] nome | chave=valor`); `{"steps":[...]}`/`_parse_steps`/`INVALID_FORMAT_NOTE` removidos. Não recriar.
 
 ## Contratos que não podem derivar
 
 - Placeholder exato: `// ... [Omitted by CapoeiraCode] ...` (`OMISSION_PLACEHOLDER`, PHP/JS) e `# ... [Omitted by CapoeiraCode] ...` (`PYTHON_OMISSION_PLACEHOLDER`, Python) — em `cli/reducers/base.py`.
-- Backend LLM: `POST {base_url}/api/chat` JSON Ollama `{model, stream:false, messages:[system, user]}`; default `http://127.0.0.1:8765` (CapoeiraHost), `--model gemini-pro`. Sem chave de API.
+- Backend LLM: `POST {base_url}/api/chat` do CapoeiraHost, **protocolo textual** — `application/x-www-form-urlencoded` com `model` (perfil), pares repetidos `role`/`content` (e `tool_call_id` em `role=tool`), `tools` textual, `stream`; resposta `text/plain`. `new_chat` **nunca** é enviado (stateless: histórico completo por requisição; host abre conversa nova). Default `http://127.0.0.1:8765` (CapoeiraHost), `--model gemini-pro`. Sem chave de API.
+- Tool calling no CapoeiraHost (textual): enviar `tools` como linhas `name=X | desc=... | arg:type` (`LLMClient.serialize_tools`) ativa o tool calling **simulado** — o modelo emite `[TOOL_CALL] nome | chave=valor` (uma por linha); o host devolve essas linhas como `text/plain` (prosa removida) **ou** prosa final. No round-trip, assistant registrado com a linha `[TOOL_CALL]` e resultado como `role:"tool"` com `tool_call_id`. `role=tool` sem `tools` → `400`. Sem detecção de backend (CapoeiraHost é o único backend). **Valores são de linha única**: `Enter` real dentro de `chave=valor` corta a chamada; `|` separa argumentos **fora** de aspas simples e é literal **dentro** de `'...'` (parser `_split_pipe_fields`); **conteúdo de arquivo/código viaja em base64** estrito (`write_file.code_content` e `run_python.code`; decode em `_decode_b64`, inválido/truncado → `role:"tool"` com erro, não grava/executa). Valor com aspa não fechada = truncado (`_truncated`) → o agente **não grava** e retorna erro ao modelo.
 - Diretório de config: `CAPOEIRA_CONFIG_DIR` → `%APPDATA%\CapoeiraCode` → `~/.capoeira`; subpastas `projects/`, `specs/`, `skills/`, `prompts/`, `blueprints/`.
-- Schema LLM (§5): ação única `{file_path, action ∈ replace_symbol|create_file|patch_diff, code_content}` **ou** lote `{"files": [...]}`; no agente, `{"steps":[...]}` com `tool ∈ read_file|list_dir|run_shell|run_python|write_file|ask_user|done`.
-- RNF-04: falha ⇒ nada é escrito (atômico, inclusive no lote); no agente, formato inválido
-  é sinalizado e o turno segue (máx. `max_turns`, padrão 20).
+- Schema LLM (§5): ação única `{file_path, action ∈ replace_symbol|create_file|patch_diff, code_content}` **ou** lote `{"files": [...]}`; no agente (CapoeiraHost), respostas em `text/plain` com linhas `[TOOL_CALL] nome | chave=valor` (parse em `_parse_tool_call_lines`) **ou** prosa final (encerra o turno). Retorno de cada passo = `role:"tool"` com `tool_call_id`.
+- RNF-04: falha ⇒ nada é escrito (atômico, inclusive no lote); no agente, respostas sem
+  linhas `[TOOL_CALL]` são prosa final e encerram o turno (máx. `max_turns`, padrão 20).
 - RNF-01: skeleton < 200 ms para 5.000 linhas (medido ~97 ms).
 - RAG: `RagClient` executa `python main.py query "<q>" [--doc-type mapeado]` no `rag.working_dir` das premissas (subprocess, independente do backend do CapoeiraCode).
 
@@ -66,6 +70,6 @@ python -m venv .venv
 
 ## Próxima iteração
 
-- **Fase 3 (UX)**: sessão múltipla por projeto, saída `--json`, autodetecção de `--project`.
+- **Fase 3 (UX)**: saída `--json`, autodetecção de `--project` (sessão múltipla por projeto já entregue).
 - **Fase 4**: reducers HTML/CSS/SQL.
 - Novos skills/prompts no template (`examples/capoeira-config.template`) conforme surgem fluxos.

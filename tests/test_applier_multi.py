@@ -2,7 +2,6 @@ import json
 import shutil
 from pathlib import Path
 
-import click.testing
 import pytest
 
 from cli.rag_client import RagClient

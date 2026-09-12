@@ -44,7 +44,7 @@ def build_generate_prompt(file_path: str, instruction: str, symbol: str | None, 
 CAMINHO DO ARQUIVO ALVO: {file_path}
 {"SÍMBOLO ALVO: " + symbol if symbol else "AÇÃO: criar um novo arquivo/artefato"}
 {contexto}
-Responda APENAS com um JSON válido que siga estritamente este esquema:
+Responda APENAS com um JSON válido (bloco de código JSON) que siga estritamente este esquema:
 {_schema_text()}
 
 Use action "{action}" com "file_path" exatamente igual a "{file_path}"{" e target_symbol \"" + target + "\"" if symbol else ""}.
@@ -68,7 +68,7 @@ CÓDIGO (esqueleto, corpos fora do alvo omitidos):
 def build_retry_prompt(original_prompt: str, error: str) -> str:
     return f"""A resposta anterior não pôde ser aplicada: {error}
 
-Responda APENAS com o JSON corrigido, sem nenhum texto adicional.
+Responda APENAS com o JSON corrigido (bloco de código JSON), sem nenhum texto adicional.
 
 ---
 {original_prompt}
@@ -76,7 +76,7 @@ Responda APENAS com o JSON corrigido, sem nenhum texto adicional.
 
 
 # Contrato de resposta do motor `run`: uma ação única OU um lote multi-arquivo.
-RUN_RESPONSE_CONTRACT = """Responda APENAS com um JSON válido, em português, escolhendo UMA das formas:
+RUN_RESPONSE_CONTRACT = """Responda APENAS com um JSON válido (bloco de código JSON), em português, escolhendo UMA das formas:
 
 1) Ação única (uma mudança):
 {
@@ -131,39 +131,45 @@ def build_run_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Modo agente (TUI interativa): contrato de ferramentas (steps)
+# Modo agente (TUI interativa): contrato de ferramentas (tool calling do host)
 # ---------------------------------------------------------------------------
 TOOLS_CONTRACT = """Você é o motor CapoeiraCode em MODO AGENTE interativo de desenvolvimento.
 
-Você dispõe de ferramentas (tool calling nativo, quando o backend oferecer) OU pode
-responder com um JSON de passos. Prefira o tool calling nativo se o backend o suportar;
-caso contrário, para cada turno responda SEMPRE com um único JSON contendo uma lista de passos:
+O backend é o CapoeiraHost e usa tool calling SIMULADO via contrato textual: quando for
+necessário chamar uma ferramenta, emita EXATAMENTE uma linha por chamada neste formato (sem
+blocos de código, sem JSON e sem marcação markdown):
 
-{
-  "steps": [
-    { "tool": "read_file",  "path": "app/views/vagas.php", "lines": [1, 120] },
-    { "tool": "list_dir",   "path": "app" },
-    { "tool": "run_shell",  "cmd": "php -l app/views/vagas.php" },
-    { "tool": "run_python", "code": "import os; print(os.listdir('.'))" },
-    { "tool": "write_file", "path": "app/models/Db.php", "action": "replace_symbol",
-      "target_symbol": "conectar", "code_content": "..." },
-    { "tool": "ask_user",   "question": "Qual o nome da tela?" },
-    { "tool": "done",       "message": "Resumo do que foi feito" }
-  ]
-}
+[TOOL_CALL] nome_da_ferramenta | chave1=valor1 | chave2=valor2
+
+Regras do formato:
+- Uma linha por chamada; pode haver texto antes e depois das linhas.
+- Valores são SEMPRE de uma linha física: NUNCA use Enter real dentro de chave=valor — a
+  chamada termina no caractere | ou na quebra de linha.
+- O caractere | separa argumentos FORA de aspas simples; dentro de um valor aspeado
+  ('...') ele é literal — use sem medo em comandos com pipe: cmd='php -l app | tail -5'.
+- Conteúdo de arquivo/código (`code_content` de write_file e `code` de run_python) deve
+  ser enviado em **base64** (bloco contínuo, sem quebras de linha, apenas A-Z a-z 0-9 + / =)
+  — evita problemas de conversão no transporte. O agente decodifica antes de gravar/executar.
+- Use aspas simples para valores com espaço: chave='valor com espaço'. Dentro de aspas,
+  escape a aspa e a barra invertida como \' e \\.
+- Números e booleanos vão direto (2, true); estruturas como listas vão como [1, 120].
+- Para chamadas paralelas, emita uma linha por chamada.
+- Se não for chamar ferramenta, responda com texto puro — isso também encerra o turno.
 
 Semântica das ferramentas:
 - read_file: lê um arquivo do projeto (opcionalmente um intervalo de linhas 1-based).
-- list_dir: lista um diretório do projeto.
+  Ex.: [TOOL_CALL] read_file | path=app/views/vagas.php | lines=[1, 120]
+- list_dir: lista um diretório do projeto. Ex.: [TOOL_CALL] list_dir | path=app
 - run_shell: executa um comando shell no diretório do projeto (ex.: lint, testes, git).
 - run_python: executa trechos de Python no diretório do projeto (ex.: inspecionar schema).
+  Ex.: [TOOL_CALL] run_python | code=aW1wb3J0IG9zCnByaW50KG9zLmxpc3RkaXIoJy4nKSk=
 - write_file: modifica o projeto. action ∈ create_file | replace_symbol | patch_diff;
   target_symbol obrigatório em replace_symbol; patch_diff usa unified diff.
+  Ex.: [TOOL_CALL] write_file | path='nova.php' | action='create_file' | target_symbol='' | code_content=PD9waHAKJG1zZyA9ICJvaSI7CmVjaG8gJG1zZzsKPz4=
 - ask_user: faz uma pergunta ao usuário (use quando faltar informação essencial).
 - done: encerra o turno de desenvolvimento. Inclua um resumo objetivo do que foi feito.
 
 Regras:
-- "tool" é obrigatório em todo passo; ignore chaves extras.
 - Prefira ler arquivos antes de alterá-los; altere o MÍNIMO necessário.
 - Caminhos relativos partem da raiz do projeto.
 - Agrupe alterações relacionadas em write_file sequenciais; nunca desative os padrões
@@ -171,7 +177,8 @@ Regras:
 - Não invente conteúdo de arquivo que não leu; use as ferramentas.
 - Se precisar da mesma informação repetidamente, não a re-leia: use o contexto da última
   resposta da ferramenta.
-- Sempre finalize o turno com um passo "done" quando a tarefa estiver concluída."""
+- Sempre finalize o turno com a ferramenta "done" (com um resumo) quando a tarefa estiver
+  concluída."""
 
 
 TOOLS_DECLARATION = [
@@ -221,7 +228,7 @@ TOOLS_DECLARATION = [
             "description": "Executa trechos de Python no diretório do projeto (ex.: inspecionar schema).",
             "parameters": {
                 "type": "object",
-                "properties": {"code": {"type": "string", "description": "Código Python a executar."}},
+                "properties": {"code": {"type": "string", "description": "Código Python em base64 (A-Za-z0-9+/=, sem quebras de linha). Escolha o python do projeto quando houver."}},
                 "required": ["code"],
             },
         },
@@ -237,7 +244,7 @@ TOOLS_DECLARATION = [
                     "path": {"type": "string", "description": "Caminho relativo ou absoluto do arquivo."},
                     "action": {"type": "string", "enum": ["create_file", "replace_symbol", "patch_diff"]},
                     "target_symbol": {"type": "string", "description": "Obrigatório em replace_symbol."},
-                    "code_content": {"type": "string", "description": "Conteúdo completo ou unified diff."},
+                    "code_content": {"type": "string", "description": "Conteúdo completo/definição/unified diff em base64 (A-Za-z0-9+/=, sem quebras de linha)."},
                     "explanation": {"type": "string", "description": "Resumo de 1 linha da alteração."},
                 },
                 "required": ["path", "action", "code_content"],
